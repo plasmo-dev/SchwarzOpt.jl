@@ -1,4 +1,4 @@
-module MGSchwarzSolver
+module SchwarzSolver
 
 using Printf
 using DataStructures

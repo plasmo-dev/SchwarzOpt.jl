@@ -1,28 +1,13 @@
 function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
-    sub_optimizer = with_optimizer(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
+    sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
     max_iterations = 100,
-    tolerance = 1e-6,
-    primal_links = [],
-    dual_links = [])
+    tolerance = 1e-3,
+    primal_links = LinkConstraintRef[],
+    dual_links = LinkConstraintRef[])
 
-end
+    #TODO: Check that subgraphs cover the entire modelgraph
 
-#Serial Schwarze Algorithm Implementation
-function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
-    sub_optimizer = with_optimizer(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
-    max_iterations = 100,
-    tolerance = 1e-6,
-    primal_links = [],
-    dual_links = [])
 
-    #NOTE: Ideally, use a copy of the model graph, or revert changes to modelgrpah
-    #copy_mg,copy_map = copy(mg)
-
-    #Check that modelgraph has subgraphs.  If not, raise error.  #Each subgraph will be used to create the subproblems we solve
-    has_subgraphs(modelgraph) || error("ModelGraph does not contains any subgraph structure.  Consider creating partitions using a graph partitioner.
-    See Documentation for details on how to do this.")
-
-    #Initialize Vectors
     x_vals = Vector{Float64}()  #Primal values for communication
     l_vals = Vector{Float64}()  #Dual values for communication
     ext_var_index_map = Dict{VariableRef,Int64}()  #map boundary variables to indices
@@ -36,12 +21,10 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
         end
     end
 
-    println("Expanding subgraph domains...")
-    #Created expanded subgraphs.  Also return the boundary edges of these expanded subgraphs
-    subgraphs,subgraph_boundary_edges = _expand_subgraphs(modelgraph,overlap) #expand_subgraphs.  TODO: Fix bug with zero overlap
-
+    println("Finding subgraph boundary edges...")
+    subgraph_boundary_edges = _find_boundaries(modelgraph,subgraphs)
     primal_links,dual_links = _assign_links(subgraphs,subgraph_boundary_edges,primal_links,dual_links)
-    #subgraph_in_edges,subgraph_out_edges = _get_edge_directions(subgraphs,subgraph_boundary_edges)
+
 
     println("Preparing subproblems...")
     #Map subproblems to their original (non-expanded) subgraphs
@@ -72,9 +55,6 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
 
     #TODO: Condense inputs into data structure
     println("Modifying subproblems...")
-
-    # _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_indices,l_vals,l_in_indices,l_out_indices,node_subgraph_map,subproblem_subgraph_map,
-    # subgraph_in_edges,subgraph_out_edges,ext_var_index_map)#,external_var_map)
 
     _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_indices,l_vals,l_in_indices,l_out_indices,node_subgraph_map,subproblem_subgraph_map,
     primal_links,dual_links,ext_var_index_map)
@@ -133,7 +113,7 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
         _update_graph_solution!(modelgraph,subproblem_subgraph_map,node_subgraph_map)
 
         #Check primal and dual feasibility.  Evaluate original partitioned link constraints (i.e. do the restriction) based on direction
-        prf = [nodevalue(linkcon.func) for linkcon in original_linkcons]
+        prf = [nodevalue(linkcon.func) - linkcon.set.value for linkcon in original_linkcons]
         duf = []
         for edge in modelgraph.linkedges
             #linkrefs = edge.linkconstraints
@@ -173,6 +153,25 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
     return :Optimal
 end
 
+function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
+    sub_optimizer = with_optimizer(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
+    max_iterations = 100,
+    tolerance = 1e-6,
+    primal_links = [],
+    dual_links = [])
+
+    has_subgraphs(modelgraph) || error("ModelGraph $modelgraph does not contains any subgraph structure.  Consider creating partitions using a graph partitioner. See Documentation for details on how to do this.")
+
+    subgraphs = getsubgraphs(modelgraph)
+
+    println("Expanding subgraph domains...")
+    expanded_subs = expand.(Ref(modelgraph),subgraphs,Ref(overlap))
+
+    status = schwarz_solve(modelgraph,expanded_subs)
+    return status
+end
+
+
 function do_iteration(node::ModelNode,x_in::Vector{Float64},l_in::Vector{Float64})
 
     update_values!(node,x_in,l_in)  #update x_in and l_in
@@ -182,15 +181,16 @@ function do_iteration(node::ModelNode,x_in::Vector{Float64},l_in::Vector{Float64
     #Update start point for next iteration
     term_status = termination_status(node)
     #!(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1)])  && error("Suboptimal solution detected for problem $node with status $term_status")
-    has_values(getmodel(node)) || error("Suboptimal solution detected for problem $node with status $term_status")
+    !(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1)])  && @warn("Suboptimal solution detected for problem $node with status $term_status")
+    has_values(getmodel(node)) || error("Could not obtain values for problem $node with status $term_status")
+    #TODO: Also check subproblem status.
+
     #return values we need to communicate to
     x_out = node.ext[:x_out]    #primal variables to communicate along in edges
     l_out = node.ext[:l_out]    #dual variables to communicate along out edges
 
-    #get variable values
+    #get variable and dual values
     xk = value.(x_out)
-
-    #println(l_out)
     lk = dual.(l_out)
 
     return xk, lk
@@ -216,28 +216,6 @@ end
 ################################################
 #SCHWARZ PROTOTYPE SOLVER UTILITY FUNCTIONS
 ################################################
-# #NOTE: This might be causing issues
-# function _get_edge_directions(subgraphs,subgraph_boundary_edges)
-#     #Each subgraph has outgoing and incoming edges(constraints). That is, we have bidirectional couplings
-#     subgraph_out_edges = [] #[[],[],[]]  #receive dual info from out edges
-#     subgraph_in_edges = []  #[[],[],[]]  #receive primal info from in edges
-#     #Let's assume that constraints go to the last node in the set.  We can make it possible to provide this mapping later.
-#     for (i,edge_set) in enumerate(subgraph_boundary_edges)
-#         out_edges = LinkEdge[]
-#         in_edges = LinkEdge[]
-#         for edge in edge_set
-#             target_node = collect(edge.nodes)[end]
-#             if !(target_node in subgraphs[i].modelnodes)
-#                 push!(out_edges,edge)  #send primal info to target node, receive dual info
-#             else
-#                 push!(in_edges,edge)   #receive primal info at target node, send back dual info
-#             end
-#         end
-#         push!(subgraph_out_edges,out_edges)
-#         push!(subgraph_in_edges,in_edges)
-#     end
-#     return subgraph_in_edges,subgraph_out_edges
-# end
 function _assign_links(subgraphs,subgraph_boundary_edges,input_primal_links,input_dual_links)
     subgraph_primal_links = []
     subgraph_dual_links = []
@@ -299,22 +277,14 @@ end
 #     subgraph_in_edges,subgraph_out_edges,ext_var_index_map)
 function _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_indices,l_vals,l_in_indices,l_out_indices,node_subgraph_map,subproblem_subgraph_map,
     primal_links,dual_links,ext_var_index_map)
+
     for i = 1:length(subproblems)
         subproblem,submap = subproblems[i]  #get the corresponding subproblem
 
-        # figure out primal and dual links
-        # in_edges = subgraph_in_edges[i]
-        # out_edges = subgraph_out_edges[i]
-
         for linkref in dual_links[i]
             edge = linkref.linkedge
-            #link = constraint_object(linkref)
+            #link = constraint_object(linkref) #TODO
             link = linkref.linkedge.linkconstraints[linkref.idx]
-            # link_idx = linkref.idx
-            # link = edge.linkconstraints[link_idx]
-
-        #for edge in out_edges
-            # for link in getlinkconstraints(edge)
 
             if !(haskey(edge.dual_values,link))
                 edge.dual_values[link] = 0.0
@@ -351,8 +321,6 @@ function _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_i
             edge = linkref.linkedge
             #link = constraint_object(linkref)
             link = linkref.linkedge.linkconstraints[linkref.idx]
-            #for edge in in_edges
-                # for link in getlinkconstraints(edge)
             vars = collect(keys(link.func.terms))                                   #variables in linkconsstraint
             external_vars = [var for var in vars if !(var in keys(submap.varmap))]  #variables not part of this subproblem
 
@@ -382,11 +350,7 @@ function _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_i
                     copyvar = _add_subproblem_var!(subproblem,ext_var)                  #create local variable on subproblem
                     #INPUTS
                     push!(x_in_indices[subproblem],idx)
-                    #external_var_map[subproblem][ext_var] = copyvar
                 end
-                # else
-                #     copyvar = subproblem.ext[:varmap]
-                # end
             end
             mapping = merge(submap.varmap,subproblem.ext[:varmap])
             _add_subproblem_constraint!(subproblem,mapping,link)               #Add link constraint to the subproblem
@@ -406,7 +370,7 @@ function _update_graph_solution!(modelgraph,subproblem_subgraph_map,node_subgrap
             end
         end
     end
-    #update link duals with target subgraph
+    #update link duals using owning subgraph
     #NOTE: this doesn't really make sense at the boundaries
     for edge in modelgraph.linkedges
         for linkcon in getlinkconstraints(edge)
@@ -417,7 +381,6 @@ function _update_graph_solution!(modelgraph,subproblem_subgraph_map,node_subgrap
             edge.dual_values[linkcon] = dual_value
         end
     end
-
     return nothing
 end
 
@@ -425,16 +388,16 @@ function _expand_subgraphs(mg::ModelGraph,overlap::Int64)
 
     subproblem_graphs = []
     boundary_linkedges_list = []
-    #Use modelgraph linkedges to get boundary nodes
     hypergraph,hyper_map = gethypergraph(mg)
+
+    #NOTE: This could all be calculated simultaneously
     for subgraph in getsubgraphs(mg)
 
         println("Performing neighborhood expansion...")
-
         subnodes = all_nodes(subgraph)
         hypernodes = [hyper_map[node] for node in subnodes]
-        #Return new hypernodes and hyperedges covered through the expansion.
 
+        #Return new hypernodes and hyperedges covered through the expansion.
         overlap_hnodes = Plasmo.neighborhood(hypergraph,hypernodes,overlap)
         overlap_hedges = Plasmo.induced_edges(hypergraph,overlap_hnodes)
         boundary_hedges = Plasmo.incident_edges(hypergraph,overlap_hnodes)
@@ -455,6 +418,23 @@ function _expand_subgraphs(mg::ModelGraph,overlap::Int64)
     return subproblem_graphs,boundary_linkedges_list
 end
 
+function _find_boundaries(mg::ModelGraph,subgraphs::Vector{ModelGraph})
+
+    boundary_linkedges_list = []
+    hypergraph,hyper_map = gethypergraph(mg)
+
+    for subgraph in subgraphs
+        subnodes = all_nodes(subgraph)
+        hypernodes = [hyper_map[node] for node in subnodes]
+        overlap_hnodes = hypernodes #Plasmo.neighborhood(hypergraph,hypernodes,overlap)
+        boundary_hedges = Plasmo.incident_edges(hypergraph,overlap_hnodes)
+        boundary_edges = [hyper_map[edge] for edge in boundary_hedges]
+        push!(boundary_linkedges_list,boundary_edges)
+    end
+
+    return boundary_linkedges_list
+end
+
 function _add_subproblem_var!(subproblem::ModelNode,ext_var::VariableRef)
     newvar = @variable(subproblem)
     JuMP.set_name(newvar,name(ext_var)*"ghost")
@@ -469,13 +449,14 @@ function _add_subproblem_constraint!(subproblem::ModelNode,mapping::Dict,con::Li
     new_con = Plasmo._copy_constraint(con,mapping)
     conref = JuMP.add_constraint(subproblem,new_con)
     push!(subproblem.ext[:added_constraints], conref)
+
+    return conref
 end
 
 function _add_subproblem_dual_penalty!(subproblem::ModelNode,mapping::Dict,con::LinkConstraint,l_start::Float64)
 
     push!(subproblem.ext[:l_in],con)
 
-    #ignore ghost var in mapping
     vars = collect(keys(con.func.terms))
     local_vars = [var for var in vars if var in keys(mapping)]
 
@@ -487,4 +468,6 @@ function _add_subproblem_dual_penalty!(subproblem::ModelNode,mapping::Dict,con::
     new_func.constant = con_func.constant
 
     subproblem.ext[:lmap][con] = new_func
+
+    return new_func
 end

@@ -1,6 +1,6 @@
-using MGSchwarzSolver
+using SchwarzSolver
 using Test
 
-@testset "MGSchwarzSolver.jl" begin
+@testset "SchwarzSolver.jl" begin
     # Write your own tests here.
 end
