@@ -1,5 +1,5 @@
 function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
-    sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
+    sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-8,"print_level" => 0),
     max_iterations = 100,
     tolerance = 1e-3,
     primal_links = LinkConstraintRef[],
@@ -154,7 +154,7 @@ function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
 end
 
 function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
-    sub_optimizer = with_optimizer(Ipopt.Optimizer,tol = 1e-8,print_level = 0),
+    sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-8,"print_level" => 0),
     max_iterations = 100,
     tolerance = 1e-6,
     primal_links = [],
@@ -167,7 +167,9 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
     println("Expanding subgraph domains...")
     expanded_subs = expand.(Ref(modelgraph),subgraphs,Ref(overlap))
 
-    status = schwarz_solve(modelgraph,expanded_subs)
+    status = schwarz_solve(modelgraph,expanded_subs;sub_optimizer = sub_optimizer,max_iterations = max_iterations,tolerance = tolerance,
+    primal_links = primal_links,dual_links = dual_links)
+
     return status
 end
 
