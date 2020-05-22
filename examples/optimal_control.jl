@@ -33,13 +33,13 @@ partition_vector = KaHyPar.partition(hypergraph,8,configuration = :connectivity,
 partition = Partition(hypergraph,partition_vector,hyper_map)
 make_subgraphs!(graph,partition)
 
-schwarz_solve(graph,overlap;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
-dual_links = [],primal_links = [])
-
-
 #Solve directly with expanded subgraphs
-# subgraphs = getsubgraphs(graph)
-# expanded_subs = expand.(Ref(graph),subgraphs,Ref(5))
-# schwarz_solve(graph,expanded_subs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
+subgraphs = getsubgraphs(graph)
+expanded_subs = expand.(Ref(graph),subgraphs,Ref(5))
+schwarz_solve(graph,expanded_subs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
+dual_links = [],primal_links = [])
+#
+
+# 
+# schwarz_solve(graph,overlap;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
 # dual_links = [],primal_links = [])
-# #

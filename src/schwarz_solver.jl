@@ -160,7 +160,8 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
     primal_links = [],
     dual_links = [])
 
-    has_subgraphs(modelgraph) || error("ModelGraph $modelgraph does not contains any subgraph structure.  Consider creating partitions using a graph partitioner. See Documentation for details on how to do this.")
+    has_subgraphs(modelgraph) || error("ModelGraph $modelgraph does not contains any subgraph structure.
+    Consider creating partitions using a graph partitioner. See Documentation for details on how to do this.")
 
     subgraphs = getsubgraphs(modelgraph)
 
