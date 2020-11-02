@@ -1,4 +1,4 @@
-function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
+function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
     sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-8,"print_level" => 0),
     max_iterations = 100,
     tolerance = 1e-3,
@@ -36,10 +36,10 @@ function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
     end
 
     #Initialize subproblem vectors
-    x_in_indices = Dict{ModelNode,Vector{Int64}}()   #map subproblem to its x_in_indices
-    l_in_indices = Dict{ModelNode,Vector{Int64}}()
-    x_out_indices = Dict{ModelNode,Vector{Int64}}()
-    l_out_indices = Dict{ModelNode,Vector{Int64}}()
+    x_in_indices = Dict{OptiNode,Vector{Int64}}()   #map subproblem to its x_in_indices
+    l_in_indices = Dict{OptiNode,Vector{Int64}}()
+    x_out_indices = Dict{OptiNode,Vector{Int64}}()
+    l_out_indices = Dict{OptiNode,Vector{Int64}}()
     for (sub,ref) in subproblems
         x_in_indices[sub] = Int64[]
         x_out_indices[sub] = Int64[]
@@ -47,8 +47,8 @@ function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
         l_out_indices[sub] = Int64[]
     end
     #Subproblem outputs
-    x_out_vals = Dict{ModelNode,Vector{Float64}}()
-    l_out_vals = Dict{ModelNode,Vector{Float64}}()
+    x_out_vals = Dict{OptiNode,Vector{Float64}}()
+    l_out_vals = Dict{OptiNode,Vector{Float64}}()
 
     #INITIALIZE SUBPROBLEM DATA
     _setup_subproblems!(subproblems,x_out_vals,l_out_vals,sub_optimizer)
@@ -81,7 +81,7 @@ function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
         end
 
         #Do iteration for each subproblem
-        for (subproblem,submap) in subproblems  #each subproblem is a ModelNode
+        for (subproblem,submap) in subproblems  #each subproblem is a OptiNode
 
             #Get primal and dual information for this subproblem
             x_in_inds = x_in_indices[subproblem]
@@ -153,14 +153,14 @@ function schwarz_solve(modelgraph::ModelGraph,subgraphs::Vector{ModelGraph};
     return :Optimal
 end
 
-function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
+function schwarz_solve(modelgraph::OptiGraph,overlap::Int64;
     sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-8,"print_level" => 0),
     max_iterations = 100,
     tolerance = 1e-6,
     primal_links = [],
     dual_links = [])
 
-    has_subgraphs(modelgraph) || error("ModelGraph $modelgraph does not contains any subgraph structure.
+    has_subgraphs(modelgraph) || error("OptiGraph $modelgraph does not contains any subgraph structure.
     Consider creating partitions using a graph partitioner. See Documentation for details on how to do this.")
 
     subgraphs = getsubgraphs(modelgraph)
@@ -175,7 +175,7 @@ function schwarz_solve(modelgraph::ModelGraph,overlap::Int64;
 end
 
 
-function do_iteration(node::ModelNode,x_in::Vector{Float64},l_in::Vector{Float64})
+function do_iteration(node::OptiNode,x_in::Vector{Float64},l_in::Vector{Float64})
 
     update_values!(node,x_in,l_in)  #update x_in and l_in
 
@@ -199,7 +199,7 @@ function do_iteration(node::ModelNode,x_in::Vector{Float64},l_in::Vector{Float64
     return xk, lk
 end
 
-function update_values!(node::ModelNode,x_in::Vector{Float64},l_in::Vector{Float64})
+function update_values!(node::OptiNode,x_in::Vector{Float64},l_in::Vector{Float64})
     #set primal values
     for (i,var) in enumerate(node.ext[:x_in]) #make sure x_in and node.ext[:x_in] match up
         fix(var,x_in[i])
@@ -224,8 +224,8 @@ function _assign_links(subgraphs,subgraph_boundary_edges,input_primal_links,inpu
     subgraph_dual_links = []
 
     for (i,edge_set) in enumerate(subgraph_boundary_edges)
-        primal_links = LinkConstraintRef[] #LinkEdge[]
-        dual_links = LinkConstraintRef[]   #LinkEdge[]
+        primal_links = LinkConstraintRef[]
+        dual_links = LinkConstraintRef[]   
 
         for edge in edge_set
             linkrefs = edge.linkrefs
@@ -387,7 +387,7 @@ function _update_graph_solution!(modelgraph,subproblem_subgraph_map,node_subgrap
     return nothing
 end
 
-function _expand_subgraphs(mg::ModelGraph,overlap::Int64)
+function _expand_subgraphs(mg::OptiGraph,overlap::Int64)
 
     subproblem_graphs = []
     boundary_linkedges_list = []
@@ -410,7 +410,7 @@ function _expand_subgraphs(mg::ModelGraph,overlap::Int64)
         boundary_edges = [hyper_map[edge] for edge in boundary_hedges]
 
         #Setup subproblem graphs
-        subproblem_graph = ModelGraph()
+        subproblem_graph = OptiGraph()
         subproblem_graph.modelnodes = overlap_nodes
         subproblem_graph.linkedges = overlap_edges
 
@@ -421,7 +421,7 @@ function _expand_subgraphs(mg::ModelGraph,overlap::Int64)
     return subproblem_graphs,boundary_linkedges_list
 end
 
-function _find_boundaries(mg::ModelGraph,subgraphs::Vector{ModelGraph})
+function _find_boundaries(mg::OptiGraph,subgraphs::Vector{OptiGraph})
 
     boundary_linkedges_list = []
     hypergraph,hyper_map = gethypergraph(mg)
@@ -438,7 +438,7 @@ function _find_boundaries(mg::ModelGraph,subgraphs::Vector{ModelGraph})
     return boundary_linkedges_list
 end
 
-function _add_subproblem_var!(subproblem::ModelNode,ext_var::VariableRef)
+function _add_subproblem_var!(subproblem::OptiNode,ext_var::VariableRef)
     newvar = @variable(subproblem)
     JuMP.set_name(newvar,name(ext_var)*"ghost")
     JuMP.start_value(ext_var) == nothing ? start = 1 : start = JuMP.start_value(ext_var)
@@ -448,7 +448,7 @@ function _add_subproblem_var!(subproblem::ModelNode,ext_var::VariableRef)
     return newvar
 end
 
-function _add_subproblem_constraint!(subproblem::ModelNode,mapping::Dict,con::LinkConstraint)
+function _add_subproblem_constraint!(subproblem::OptiNode,mapping::Dict,con::LinkConstraint)
     new_con = Plasmo._copy_constraint(con,mapping)
     conref = JuMP.add_constraint(subproblem,new_con)
     push!(subproblem.ext[:added_constraints], conref)
@@ -456,7 +456,7 @@ function _add_subproblem_constraint!(subproblem::ModelNode,mapping::Dict,con::Li
     return conref
 end
 
-function _add_subproblem_dual_penalty!(subproblem::ModelNode,mapping::Dict,con::LinkConstraint,l_start::Float64)
+function _add_subproblem_dual_penalty!(subproblem::OptiNode,mapping::Dict,con::LinkConstraint,l_start::Float64)
 
     push!(subproblem.ext[:l_in],con)
 
