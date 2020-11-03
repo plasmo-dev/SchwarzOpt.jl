@@ -8,9 +8,9 @@ d = sin.(1:T)    #disturbance vector
 overlap = 5
 imbalance = 0.1
 
-graph = ModelGraph()
-@node(graph,state[1:T])
-@node(graph,control[1:T-1])
+graph = OptiGraph()
+@optinode(graph,state[1:T])
+@optinode(graph,control[1:T-1])
 
 for (i,node) in enumerate(state)
     @variable(node,x)

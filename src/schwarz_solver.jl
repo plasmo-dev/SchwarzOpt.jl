@@ -5,9 +5,7 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
     primal_links = LinkConstraintRef[],
     dual_links = LinkConstraintRef[])
 
-    #TODO: Check that subgraphs cover the entire modelgraph
-
-
+    #TODO: Check that subgraphs cover the entire optigraph
     x_vals = Vector{Float64}()  #Primal values for communication
     l_vals = Vector{Float64}()  #Dual values for communication
     ext_var_index_map = Dict{VariableRef,Int64}()  #map boundary variables to indices
@@ -21,12 +19,13 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
         end
     end
 
-    println("Finding subgraph boundary edges...")
+    println("Preparing subproblems...")
+    #println("Finding subgraph boundary edges...")
     subgraph_boundary_edges = _find_boundaries(modelgraph,subgraphs)
     primal_links,dual_links = _assign_links(subgraphs,subgraph_boundary_edges,primal_links,dual_links)
 
 
-    println("Preparing subproblems...")
+
     #Map subproblems to their original (non-expanded) subgraphs
     subproblems = combine.(subgraphs)
     subproblem_subgraph_map = Dict()
@@ -54,7 +53,7 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
     _setup_subproblems!(subproblems,x_out_vals,l_out_vals,sub_optimizer)
 
     #TODO: Condense inputs into data structure
-    println("Modifying subproblems...")
+    #println("Modifying subproblems...")
 
     _modify_subproblems!(modelgraph,subproblems,x_vals,x_in_indices,x_out_indices,l_vals,l_in_indices,l_out_indices,node_subgraph_map,subproblem_subgraph_map,
     primal_links,dual_links,ext_var_index_map)
@@ -73,7 +72,9 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
 
     # Initialize primal and dual information for each subproblem
     iteration = 0
-    #@printf("Iteration: %4i Prf: %7.2e Duf: %7.2e\n",cnt,err_pr,err_du)
+
+    @printf "Running Schwarz algorithm with: %2i threads\n" Threads.nthreads()
+    println()
     while err_pr > tolerance || err_du > tolerance
         iteration += 1
         if iteration > max_iterations
@@ -81,8 +82,8 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
         end
 
         #Do iteration for each subproblem
-        for (subproblem,submap) in subproblems  #each subproblem is a OptiNode
-
+        Threads.@threads for (subproblem,submap) in subproblems  #each subproblem is a OptiNode
+        #for (subproblem,submap) in subproblems  #each subproblem is a OptiNode
             #Get primal and dual information for this subproblem
             x_in_inds = x_in_indices[subproblem]
             l_in_inds = l_in_indices[subproblem]
@@ -90,7 +91,7 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
             x_in = x_vals[x_in_inds]
             l_in = l_vals[l_in_inds]
 
-            #TODO: Parallel do_iteration using remote subproblems
+            #TODO: Parallel do_iteration
             xk,lk = do_iteration(subproblem,x_in,l_in)  #return primal and dual information we need to communicate to other subproblems
 
             #Update primal and dual information for other subproblems.  Use restriction to make sure we grab the right values
@@ -145,7 +146,10 @@ function schwarz_solve(modelgraph::OptiGraph,subgraphs::Vector{OptiGraph};
         err_du = norm(duf[:],Inf)
         obj = nodevalue(graph_obj)
 
-        @printf("%4i %7.2e %7.2e %7.2e\n",iteration,obj,err_pr,err_du)
+        if iteration % 20 == 0 || iteration == 1
+            @printf "%4s | %8s | %8s | %8s" "Iter" "Obj" "Prf" "Duf\n"
+        end
+        @printf("%4i | %7.2e | %7.2e | %7.2e\n",iteration,obj,err_pr,err_du)
         push!(modelgraph.obj_dict[:err_save],[err_pr err_du])
         push!(modelgraph.obj_dict[:objective_iters],obj)
     end
@@ -179,12 +183,12 @@ function do_iteration(node::OptiNode,x_in::Vector{Float64},l_in::Vector{Float64}
 
     update_values!(node,x_in,l_in)  #update x_in and l_in
 
+
     optimize!(node) #optimize a subproblem
 
     #Update start point for next iteration
     term_status = termination_status(node)
-    #!(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1)])  && error("Suboptimal solution detected for problem $node with status $term_status")
-    !(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1)])  && @warn("Suboptimal solution detected for problem $node with status $term_status")
+    !(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1),MOI.TerminationStatusCode(10)])  && @warn("Suboptimal solution detected for problem $node with status $term_status")
     has_values(getmodel(node)) || error("Could not obtain values for problem $node with status $term_status")
     #TODO: Also check subproblem status.
 
@@ -225,7 +229,7 @@ function _assign_links(subgraphs,subgraph_boundary_edges,input_primal_links,inpu
 
     for (i,edge_set) in enumerate(subgraph_boundary_edges)
         primal_links = LinkConstraintRef[]
-        dual_links = LinkConstraintRef[]   
+        dual_links = LinkConstraintRef[]
 
         for edge in edge_set
             linkrefs = edge.linkrefs
