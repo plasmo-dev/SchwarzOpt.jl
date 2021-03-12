@@ -30,6 +30,7 @@ function SchwarzSolution(subgraphs::Vector{OptiGraph})
 end
 
 function _initialize_schwarz!(optigraph::OptiGraph,subgraphs::Vector{OptiGraph},primal_links::Vector,dual_links::Vector)
+
     #MAP OPTINODES TO ORIGNAL SUBGRAPHS
     node_subgraph_map = Dict()
     original_subgraphs = getsubgraphs(optigraph)
@@ -214,8 +215,8 @@ function _add_subproblem_var!(subgraph::OptiGraph,ext_var::VariableRef)
     return newvar
 end
 
-function _add_subproblem_constraint!(subgraph::OptiGraph,con::LinkConstraint)
-    #Add local linkconstraint for this subproblem
+#Add link constraint to optigraph connecting to ghost node
+function _add_subproblem_constraint!(subproblem::OptiGraph,con::LinkConstraint)
     varmap = subgraph.ext[:varmap]
     new_con = Plasmo._copy_constraint(con,varmap)
     conref = JuMP.add_constraint(subproblem,new_con)
@@ -223,7 +224,8 @@ function _add_subproblem_constraint!(subgraph::OptiGraph,con::LinkConstraint)
     return conref
 end
 
-function _add_subproblem_dual_penalty!(subgraph::OptiGraph,con::LinkConstraint,l_start::Float64)
+#Set optigraph objective
+function _add_subproblem_dual_penalty!(subproblem::OptiGraph,con::LinkConstraint)
     push!(subproblem.ext[:l_in],con)
 
     vars = collect(keys(con.func.terms))

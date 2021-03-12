@@ -36,5 +36,6 @@ make_subgraphs!(graph,partition)
 #Solve directly with expanded subgraphs
 subgraphs = getsubgraphs(graph)
 expanded_subs = expand.(Ref(graph),subgraphs,Ref(5))
+
 schwarz_solve(graph,expanded_subs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
 dual_links = [],primal_links = [])
