@@ -8,7 +8,9 @@ function schwarz_solve(optigraph::OptiGraph,subgraphs::Vector{OptiGraph};
 
      #new optigraph references used for subproblems
     println("Initializing subproblems...")
+
     subproblems = [OptiGraph(all_nodes(subgraph),all_edges(subgraph)) for subgraph in subgraphs]
+
     schwarz_data,schwarz_sol = _initalize_schwarz!(optigraph,subproblems,sub_optimizer,primal_links,dual_links)
     #schwarz_sol = SchwarzSolution(subgraphs)
 
@@ -106,8 +108,7 @@ function schwarz_solve(optigraph::OptiGraph,subgraphs::Vector{OptiGraph};
 
     #_clean_changes() #TODO: Remove changes we made to optinodes and optigraphs
 
-
-    #TODO: Return MOI Status Code
+    #TODO: Setup MathOptInterface
     return MOI.OPTIMAL
 end
 
