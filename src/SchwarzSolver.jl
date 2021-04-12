@@ -4,13 +4,15 @@ using Printf
 using DataStructures
 using LinearAlgebra
 import LinearAlgebra: BLAS
-using MathOptInterface
-using Plasmo
-using Ipopt
 
+using MathOptInterface, Plasmo, JuMP
 
 export schwarz_solve
 
-include("schwarz_solver.jl")
+include("utils.jl")
 
-end # module
+include("optimizer.jl")
+
+include("schwarz_solve.jl")
+
+end
