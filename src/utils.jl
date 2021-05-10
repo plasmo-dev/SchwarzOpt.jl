@@ -33,7 +33,6 @@ function _expand_subgraphs(graph::OptiGraph,overlap::Int64)
 end
 
 #Links can be formulated as either constraints or penalties
-#BUG: Nodes are not showing up in correct subgraphs
 function _assign_links(subgraphs,subgraph_boundary_edges,input_primal_links,input_dual_links)
     subgraph_primal_links = []
     subgraph_dual_links = []
@@ -68,7 +67,6 @@ function _assign_links(subgraphs,subgraph_boundary_edges,input_primal_links,inpu
 end
 
 #Find boundary edges of expanded subgraphs
-#BUG: the boundary nodes don't show up in the subgraph
 function _find_boundaries(optigraph::OptiGraph,subgraphs::Vector{OptiGraph})
     boundary_linkedges_list = []
     for subgraph in subgraphs
@@ -79,3 +77,18 @@ function _find_boundaries(optigraph::OptiGraph,subgraphs::Vector{OptiGraph})
     end
     return boundary_linkedges_list
 end
+
+
+# TODO: Better Initial dual start
+# Initialize dual values
+# if !(haskey(edge.dual_values,link))
+#     edge.dual_values[link] = 0.0
+# end
+
+# #INPUTS to subproblem
+# if edge.dual_values[link] != nothing
+#     push!(optimizer.l_vals,edge.dual_values[link])
+# else
+#     push!(optimizer.l_vals,0.0)  #initial dual value
+# end
+# Just grab the dual start on the edges
