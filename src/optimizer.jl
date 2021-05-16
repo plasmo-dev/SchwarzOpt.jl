@@ -194,7 +194,7 @@ function _initialize_optimizer!(optimizer::SchwarzOptimizer,
             incident_variables = setdiff(vars,all_variables(subproblem_graph))
             for incident_variable in incident_variables
                 if !(incident_variable in keys(optimizer.incident_variable_map))                  #if incident variable hasn't been counted yet, create a new one
-                    JuMP.start_value(incident_variable) == nothing ? start = 1 : start = JuMP.start_value(incident_variable)
+                    JuMP.start_value(incident_variable) == nothing ? start = 0 : start = JuMP.start_value(incident_variable)
                     push!(optimizer.x_vals,start)                                                 #increment x_vals
 
                     idx = length(optimizer.x_vals)                                                #get index
@@ -226,7 +226,7 @@ function _add_subproblem_variable!(subproblem_graph::OptiGraph,incident_variable
     copy_node = @optinode(subproblem_graph)
     copy_variable = @variable(copy_node)
     JuMP.set_name(copy_variable,name(incident_variable)*"_copy")
-    JuMP.start_value(incident_variable) == nothing ? start = 1 : start = JuMP.start_value(incident_variable)
+    JuMP.start_value(incident_variable) == nothing ? start = 0 : start = JuMP.start_value(incident_variable)
     #JuMP.fix(copy_variable,start)
     subproblem_graph.ext[:incident_variable_map][incident_variable] = copy_variable
     #push!(subproblem.ext[:x_in],copy_variable)
@@ -261,7 +261,7 @@ function _do_iteration(subproblem_graph::OptiGraph)
     Plasmo.optimize!(subproblem_graph)
 
     term_status = termination_status(subproblem_graph)
-    !(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1),MOI.TerminationStatusCode(10)]) && @warn("Suboptimal solution detected for problem $node with status $term_status")
+    !(term_status in [MOI.TerminationStatusCode(4),MOI.TerminationStatusCode(1),MOI.TerminationStatusCode(10)]) && @warn("Suboptimal solution detected for subproblem with status $term_status")
     #has_values(subproblem_graph) || error("Could not obtain values for problem $subproblem_graph with status $term_status")
 
     x_out = subproblem_graph.ext[:x_out_map]           #primal variables to communicate
@@ -287,7 +287,7 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
         penalty = subproblem_graph.ext[:l_in_map][idx]
         JuMP.set_objective_function(subproblem_graph,subproblem_graph.ext[:original_objective] - l_in_vals[i]*penalty)
         # for (term,coeff) in penalty.terms
-        #     JuMP.set_objective_coefficient(subproblem_graph,term,coeff*l_vals[i])
+        #     JuMP.set_objective_coefficient(subproblem_graph,term,coeff*l_vals[i])  #This isn't really what we want.  We should be setting the penalty on the dual term.
         # end
     end
     #penalty = subproblem_graph.ext[:dual_multiplier_map][link_reference]
@@ -311,7 +311,6 @@ function _calculate_primal_feasibility(optimizer)
         end
         push!(prf,val - linkcon.set.value)
     end
-    #prf = [value(linkcon.func) - linkcon.set.value for linkcon in original_linkcons] #Use node values
     return prf
 end
 
@@ -342,7 +341,6 @@ function _calculate_dual_feasibility(optimizer)
 end
 
 function optimize!(optimizer::SchwarzOptimizer)
-    #original_linkcons = link_constraints(optimizer.graph)
     optimizer.iteration = 0
     while optimizer.err_pr > tolerance || optimizer.err_du > tolerance
         optimizer.iteration += 1
@@ -361,29 +359,18 @@ function optimize!(optimizer::SchwarzOptimizer)
                 SchwarzSolver._update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
             end
 
-            xk,lk = SchwarzSolver._do_iteration(subproblem_graph)  #return primal and dual information we need to communicate to other subproblems
+            #Returns primal and dual information we need to communicate to other subproblems
+            xk,lk = SchwarzSolver._do_iteration(subproblem_graph)
 
-            #Update primal and dual information for other subproblems.  Use restriction to make sure we grab the right values
+            #Updates primal and dual information for other subproblems.
             for (idx,val) in xk
                 optimizer.x_vals[idx] = val
             end
             for (idx,val) in lk
                 optimizer.l_vals[idx] = val
             end
-
-            # optimizer.x_out_vals[subproblem_graph] = xk    #Update primal info we need to communicate to other subproblems
-            # optimizer.l_out_vals[subproblem_graph] = lk    #Update dual info we need to communicate to other subproblems
         end
 
-        # #UPDATE x_vals and l_vals to communicate to other subproblems
-        # for (subproblem_graph,values) in optimizer.x_out_vals
-        #     x_out_inds = optimizer.x_out_indices[subproblem_graph]
-        #     optimizer.x_vals[x_out_inds] .= values
-        # end
-        # for (subproblem_graph,values) in optimizer.l_out_vals
-        #     l_out_inds = optimizer.l_out_indices[subproblem_graph]
-        #     optimizer.l_vals[l_out_inds] .= values
-        # end
 
         #Evaluate residuals
         #Use restricted node values to evaluate optimality
@@ -408,6 +395,3 @@ function optimize!(optimizer::SchwarzOptimizer)
         end
     end
 end
-
-# dual_link_map = Dict(zip(vcat(dual_links...),1:length(dual_links)))
-# primal_link_map = Dict(zip(vcat(primal_links...),1:length(primal_links)))

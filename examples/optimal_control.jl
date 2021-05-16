@@ -43,15 +43,23 @@ partition_vector = KaHyPar.partition(hypergraph,8,configuration = :connectivity,
 partition = Partition(hypergraph,partition_vector,hyper_map)
 apply_partition!(graph,partition)
 
+#
+#supported_structures(SchwarzOpt.Optimizer)
+#OR:
+#@partition_to_subgraphs KaHyPar.partition(graph,8,configuration = :connectivity,imbalance = imbalance)
+#partition_to_subgraphs!(graph,KaHyPar.partition,8,configuration = :connectivity,imbalance = imbalance)
+#graph_structure(graph)
+
 #Provide expanded subgraphs
 subgraphs = getsubgraphs(graph)
 distance = 5
 expanded_subgraphs = expand.(Ref(graph),subgraphs,Ref(distance))
 
+
 #set an optigraph optimizer
-# set_optimizer(graph,SchwarzOpt.Optimizer(graph,expanded_subgraphs))
-# set_optimizer(graph,SchwarzOpt.Optimizer(graph,distance))
-# optimize!(graph)
+set_optimizer(graph,SchwarzOpt.Optimizer(graph,expanded_subgraphs))
+set_optimizer(graph,SchwarzOpt.Optimizer(graph,distance))
+optimize!(graph)
 
 #schwarz_solve(graph,expanded_subs)
 
