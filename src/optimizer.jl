@@ -1,6 +1,9 @@
 mutable struct SchwarzOptimizer <: Plasmo.OptiGraphOptimizer
     graph::OptiGraph                                #Subgraphs should not have any overlap and should cover all the nodes
     subproblem_graphs::Vector{OptiGraph}            #These are the expanded subgraphs
+    sub_optimizer::Any
+    tolerance::Float64
+    max_iterations::Int64
 
     x_in_indices::Dict{OptiGraph,Vector{Int64}}   #primals into subproblem
     l_in_indices::Dict{OptiGraph,Vector{Int64}}   #duals into subproblem
@@ -61,9 +64,9 @@ mutable struct SchwarzOptimizer <: Plasmo.OptiGraphOptimizer
     end
 end
 
-function SchwarzOptimizer(graph::OptiGraph,subgraphs::Vector{OptiGraph})
+function SchwarzOptimizer(graph::OptiGraph,subgraphs::Vector{OptiGraph};sub_optimizer = nothing,primal_links = [],dual_links = [],tolerance = 1e-6,max_iterations = 100)
     optimizer = SchwarzOptimizer()
-    _initialize_optimizer!(optimizer,graph,subgraphs)
+    _initialize_optimizer!(optimizer,graph,subgraphs,sub_optimizer,primal_links,dual_links,tolerance,max_iterations)
     return optimizer
 end
 
@@ -82,9 +85,14 @@ function _initialize_optimizer!(optimizer::SchwarzOptimizer,
     overlap_subgraphs::Vector{OptiGraph},
     sub_optimizer::Any,
     primal_links::Vector,
-    dual_links::Vector)
+    dual_links::Vector,
+    tolerance::Float64,
+    max_iterations::Int64)
 
     optimizer.graph = graph
+    optimizer.sub_optimizer = sub_optimizer
+    optimizer.tolerance = tolerance
+    optimizer.max_iterations = max_iterations
 
     for subgraph in overlap_subgraphs
         sub = Plasmo.optigraph_reference(subgraph)
@@ -129,20 +137,15 @@ function _initialize_optimizer!(optimizer::SchwarzOptimizer,
         subgraph.ext[:x_in_map] = Dict{Int64,VariableRef}()                              #copy variables into subproblem
         subgraph.ext[:x_out_map] = Dict{Int64,VariableRef}()                             #variables out of subproblem
         subgraph.ext[:incident_variable_map] = Dict{VariableRef,VariableRef}()           #map incident variables to local variables
-        #subgraph.ext[:incident_constraints] = ConstraintRef[]                     #link constraints added to this subproblem
 
         #Dual data
         subgraph.ext[:l_in_map] = Dict{Int64,GenericAffExpr{Float64,VariableRef}}()                      #duals for penalty
         subgraph.ext[:l_out_map] = Dict{Int64,LinkConstraintRef}()                     #duals from linkconstraint
-        #subgraph.ext[:dual_multiplier_map] = Dict{LinkConstraintRef,GenericAffExpr{Float64,VariableRef}}()  #map linkconstraints to penalty terms
 
         #Original objective function
         JuMP.set_objective(subgraph,MOI.MIN_SENSE,sum(objective_function(node) for node in all_nodes(subgraph)))
         obj = objective_function(subgraph)
         subgraph.ext[:original_objective] = obj
-
-        #setup optimizer
-        JuMP.set_optimizer(subgraph,sub_optimizer)
     end
 
     #IDEA TODO:pre-allocate vectors based on dual and primal links
@@ -269,8 +272,6 @@ function _do_iteration(subproblem_graph::OptiGraph)
 
     xk = Dict(key => value(subproblem_graph,val) for (key,val) in x_out)
     lk = Dict(key => dual(subproblem_graph,val) for (key,val) in l_out)
-    #xk = value.(Ref(subproblem_graph),x_out)    #grab primals for this subproblem
-    #lk = dual.(Ref(subproblem_graph),l_out)     #grab duals for this subproblem
     return xk, lk
 end
 
@@ -279,12 +280,12 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
     @assert length(x_in_vals) == length(x_in_inds)
     @assert length(l_in_vals) == length(l_in_inds)
     for (i,idx) in enumerate(x_in_inds)
-        println(idx)
         variable = subproblem_graph.ext[:x_in_map][idx]
         JuMP.fix(variable,x_in_vals[i]) #fix variable for this subproblem
     end
     for (i,idx) in enumerate(l_in_inds)
         penalty = subproblem_graph.ext[:l_in_map][idx]
+        #TODO: just update objective function coefficient
         JuMP.set_objective_function(subproblem_graph,subproblem_graph.ext[:original_objective] - l_in_vals[i]*penalty)
         # for (term,coeff) in penalty.terms
         #     JuMP.set_objective_coefficient(subproblem_graph,term,coeff*l_vals[i])  #This isn't really what we want.  We should be setting the penalty on the dual term.
@@ -294,8 +295,6 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
     return nothing
 end
 
-#use restricted subgraph values to calculate primal feasibility
-#TODO
 function _calculate_primal_feasibility(optimizer)
     linkrefs = getlinkconstraints(optimizer.graph)
     prf = []
@@ -314,7 +313,7 @@ function _calculate_primal_feasibility(optimizer)
     return prf
 end
 
-#Need at least overlap of one
+#NOTE: Need at least overlap of one
 #TODO: Correctly calculate dual resiudal.  This only works for simple overlaps. Is this causing issues with larger problems?
 function _calculate_dual_feasibility(optimizer)
     linkrefs = getlinkconstraints(optimizer.graph)
@@ -340,9 +339,18 @@ function _calculate_dual_feasibility(optimizer)
     return duf
 end
 
-function optimize!(optimizer::SchwarzOptimizer)
+function Plasmo.optimize!(optimizer::SchwarzOptimizer)
+    if optimizer.sub_optimizer == nothing
+        error("No optimizer set for subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs")
+    end
+
+    #setup subproblem optimizers
+    for subgraph in optimizer.subproblem_graphs
+        JuMP.set_optimizer(subgraph,optimizer.sub_optimizer)
+    end
+
     optimizer.iteration = 0
-    while optimizer.err_pr > tolerance || optimizer.err_du > tolerance
+    while optimizer.err_pr > optimizer.tolerance || optimizer.err_du > optimizer.tolerance
         optimizer.iteration += 1
         if optimizer.iteration > optimizer.max_iterations
             optimizer.status = MOI.ITERATION_LIMIT
@@ -371,16 +379,13 @@ function optimize!(optimizer::SchwarzOptimizer)
             end
         end
 
-
         #Evaluate residuals
-        #Use restricted node values to evaluate optimality
-        #Swap out terms, etc..
         prf = SchwarzSolver._calculate_primal_feasibility(optimizer)
         duf = SchwarzSolver._calculate_dual_feasibility(optimizer)
 
         optimizer.err_pr = norm(prf[:],Inf)
         optimizer.err_du = norm(duf[:],Inf)
-        optimizer.objective_value = value(objective_function(graph))
+        optimizer.objective_value = value(objective_function(optimizer.graph))
         push!(optimizer.primal_error_iters,optimizer.err_pr)
         push!(optimizer.dual_error_iters,optimizer.err_du)
         push!(optimizer.objective_iters,optimizer.objective_value)
@@ -389,7 +394,7 @@ function optimize!(optimizer::SchwarzOptimizer)
         if optimizer.iteration % 20 == 0 || optimizer.iteration == 1
             @printf "%4s | %8s | %8s | %8s" "Iter" "Obj" "Prf" "Duf\n"
         end
-        @printf("%4i | %7.2e | %7.2e | %7.2e\n",optimizer.iteration,optimizer.obj_val,optimizer.err_pr,optimizer.err_du)
+        @printf("%4i | %7.2e | %7.2e | %7.2e\n",optimizer.iteration,optimizer.objective_value,optimizer.err_pr,optimizer.err_du)
         for subproblem in optimizer.subproblem_graphs
             JuMP.set_start_value.(Ref(subproblem),all_variables(subproblem),value.(Ref(subproblem),all_variables(subproblem)))
         end

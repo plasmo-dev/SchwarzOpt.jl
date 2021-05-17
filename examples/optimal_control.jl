@@ -5,8 +5,8 @@ using SchwarzSolver
 
 T = 3000          #number of time points
 d = sin.(1:T)     #disturbance vector
-overlap = 5
-imbalance = 0.1
+imbalance = 0.01
+distance = 15
 
 graph = OptiGraph()
 @optinode(graph,state[1:T])
@@ -39,7 +39,7 @@ end
 
 #Partition the problem
 hypergraph,hyper_map = gethypergraph(graph) #create hypergraph object based on graph
-partition_vector = KaHyPar.partition(hypergraph,8,configuration = :connectivity,imbalance = imbalance)
+partition_vector = KaHyPar.partition(hypergraph,16,configuration = :connectivity,imbalance = imbalance)
 partition = Partition(hypergraph,partition_vector,hyper_map)
 apply_partition!(graph,partition)
 
@@ -52,22 +52,12 @@ apply_partition!(graph,partition)
 
 #Provide expanded subgraphs
 subgraphs = getsubgraphs(graph)
-distance = 5
 expanded_subgraphs = expand.(Ref(graph),subgraphs,Ref(distance))
 
-
+# ipopt = optimizer_with_attributes(Ipopt.Optimizer,"print_level" => 0)
+# set_optimizer(graph,ipopt)
+# optimize!(graph)
 #set an optigraph optimizer
-set_optimizer(graph,SchwarzOpt.Optimizer(graph,expanded_subgraphs))
-set_optimizer(graph,SchwarzOpt.Optimizer(graph,distance))
+set_optimizer(graph,SchwarzSolver.SchwarzOptimizer(graph,expanded_subgraphs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"print_level" => 0)))
+#set_optimizer(graph,SchwarzOpt.Optimizer(graph,distance))
 optimize!(graph)
-
-#schwarz_solve(graph,expanded_subs)
-
-# set_optimizer(graph,SchwarzSolver.Optimizer)
-#
-
-
-
-
-# schwarz_solve(graph,expanded_subs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
-# dual_links = [],primal_links = [])
