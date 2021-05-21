@@ -72,7 +72,7 @@ end
 
 #NOTE: Optinode solutions will point to the SchwarzOptimizer solution
 MOI.get(optimizer::SchwarzOptimizer,attr::MOI.ObjectiveValue) = optimizer.objective_value
-MOI.get(optimizer::SchwarzOptimizer,attr::MOI.TerminationStatusCode) = optimizer.termination_status
+MOI.get(optimizer::SchwarzOptimizer,attr::MOI.TerminationStatus) = optimizer.status
 supported_structures(optimizer::SchwarzOptimizer) = [Plasmo.RECURSIVE_GRAPH_STRUCTURE]
 
 #TODO
@@ -281,7 +281,7 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
     @assert length(l_in_vals) == length(l_in_inds)
     for (i,idx) in enumerate(x_in_inds)
         variable = subproblem_graph.ext[:x_in_map][idx]
-        JuMP.fix(variable,x_in_vals[i]) #fix variable for this subproblem
+        JuMP.fix(variable,x_in_vals[i]) #fix variable for this subproblem.  variable should be the copy made for this subgraph
     end
     for (i,idx) in enumerate(l_in_inds)
         penalty = subproblem_graph.ext[:l_in_map][idx]
@@ -291,10 +291,20 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
         #     JuMP.set_objective_coefficient(subproblem_graph,term,coeff*l_vals[i])  #This isn't really what we want.  We should be setting the penalty on the dual term.
         # end
     end
-    #penalty = subproblem_graph.ext[:dual_multiplier_map][link_reference]
     return nothing
 end
 
+function _calculate_objective_value(optimizer)
+    obj_val = 0
+    for node in all_nodes(optimizer.graph)
+        graph = optimizer.node_subgraph_map[node]
+        subproblem_graph = optimizer.expanded_subgraph_map[graph]
+        obj_val += objective_value(subproblem_graph,node)
+    end
+    return obj_val
+end
+
+#TODO: figure out these mappings ahead of time
 function _calculate_primal_feasibility(optimizer)
     linkrefs = getlinkconstraints(optimizer.graph)
     prf = []
@@ -332,22 +342,29 @@ function _calculate_dual_feasibility(optimizer)
             l_val = dual(subproblem_graph,linkref)   #check each subproblem's dual value for this linkconstraint
             push!(lambdas,l_val)
         end
-        @assert length(lambdas) == 2
-        dual_res = lambdas[1] - lambdas[2]
+        #@assert length(lambdas) == 2
+        dual_res = maximum(diff(lambdas))#lambdas[1] - lambdas[2]
         push!(duf,dual_res)
     end
     return duf
 end
 
 function Plasmo.optimize!(optimizer::SchwarzOptimizer)
+    println("Optimizing with SchwarzOpt v0.1.0")
+    println("Number of variables: $(num_all_variables(optimizer.graph))")
+    println()
+
     if optimizer.sub_optimizer == nothing
-        error("No optimizer set for subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs")
+        error("No optimizer set for the subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs")
     end
 
     #setup subproblem optimizers
     for subgraph in optimizer.subproblem_graphs
         JuMP.set_optimizer(subgraph,optimizer.sub_optimizer)
     end
+
+    optimizer.err_pr = Inf
+    optimizer.err_du = Inf
 
     optimizer.iteration = 0
     while optimizer.err_pr > optimizer.tolerance || optimizer.err_du > optimizer.tolerance
@@ -356,17 +373,20 @@ function Plasmo.optimize!(optimizer::SchwarzOptimizer)
             optimizer.status = MOI.ITERATION_LIMIT
             break
         end
-        #Do iteration for each subproblem
-        Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
-            x_in_inds = optimizer.x_in_indices[subproblem_graph]
-            l_in_inds = optimizer.l_in_indices[subproblem_graph]
-            x_in_vals = optimizer.x_vals[x_in_inds]
-            l_in_vals = optimizer.l_vals[l_in_inds]
 
-            if optimizer.iteration > 1 #don't fix variables in first iteration
+        #Do iteration for each subproblem
+        if optimizer.iteration > 1 #don't fix variables in first iteration
+            for subproblem_graph in optimizer.subproblem_graphs
+                x_in_inds = optimizer.x_in_indices[subproblem_graph]
+                l_in_inds = optimizer.l_in_indices[subproblem_graph]
+                x_in_vals = optimizer.x_vals[x_in_inds]
+                l_in_vals = optimizer.l_vals[l_in_inds]
                 SchwarzSolver._update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
             end
+        end
 
+        Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
+            
             #Returns primal and dual information we need to communicate to other subproblems
             xk,lk = SchwarzSolver._do_iteration(subproblem_graph)
 
@@ -382,10 +402,13 @@ function Plasmo.optimize!(optimizer::SchwarzOptimizer)
         #Evaluate residuals
         prf = SchwarzSolver._calculate_primal_feasibility(optimizer)
         duf = SchwarzSolver._calculate_dual_feasibility(optimizer)
+        #obj = SchwarzSolver._calculate_objective_value(optimizer)
 
         optimizer.err_pr = norm(prf[:],Inf)
         optimizer.err_du = norm(duf[:],Inf)
+
         optimizer.objective_value = value(objective_function(optimizer.graph))
+
         push!(optimizer.primal_error_iters,optimizer.err_pr)
         push!(optimizer.dual_error_iters,optimizer.err_du)
         push!(optimizer.objective_iters,optimizer.objective_value)
@@ -399,4 +422,10 @@ function Plasmo.optimize!(optimizer::SchwarzOptimizer)
             JuMP.set_start_value.(Ref(subproblem),all_variables(subproblem),value.(Ref(subproblem),all_variables(subproblem)))
         end
     end
+    #Point variables to restricted solutions
+    for (node,subgraph) in optimizer.node_subgraph_map
+        exp_graph = optimizer.expanded_subgraph_map[subgraph]
+        backend(node).last_solution_id = exp_graph.id
+    end
+
 end
