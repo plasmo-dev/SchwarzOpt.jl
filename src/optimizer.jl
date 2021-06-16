@@ -1,4 +1,4 @@
-mutable struct SchwarzOptimizer <: Plasmo.OptiGraphOptimizer
+mutable struct Optimizer <: Plasmo.OptiGraphOptimizer
     graph::OptiGraph                                #Subgraphs should not have any overlap and should cover all the nodes
     subproblem_graphs::Vector{OptiGraph}            #These are the expanded subgraphs
     sub_optimizer::Any
@@ -31,7 +31,9 @@ mutable struct SchwarzOptimizer <: Plasmo.OptiGraphOptimizer
     dual_error_iters::Vector{Float64}
     objective_iters::Vector{Float64}
 
-    function SchwarzOptimizer()
+    solve_time::Float64
+
+    function Optimizer()
         optimizer = new()
 
         optimizer.subproblem_graphs = Vector{OptiGraph}()
@@ -64,23 +66,24 @@ mutable struct SchwarzOptimizer <: Plasmo.OptiGraphOptimizer
     end
 end
 
-function SchwarzOptimizer(graph::OptiGraph,subgraphs::Vector{OptiGraph};sub_optimizer = nothing,primal_links = [],dual_links = [],tolerance = 1e-6,max_iterations = 100)
-    optimizer = SchwarzOptimizer()
+function Optimizer(graph::OptiGraph,subgraphs::Vector{OptiGraph};sub_optimizer = nothing,primal_links = [],dual_links = [],tolerance = 1e-6,max_iterations = 100)
+    optimizer = Optimizer()
     _initialize_optimizer!(optimizer,graph,subgraphs,sub_optimizer,primal_links,dual_links,tolerance,max_iterations)
     return optimizer
 end
 
-#NOTE: Optinode solutions will point to the SchwarzOptimizer solution
-MOI.get(optimizer::SchwarzOptimizer,attr::MOI.ObjectiveValue) = optimizer.objective_value
-MOI.get(optimizer::SchwarzOptimizer,attr::MOI.TerminationStatus) = optimizer.status
-supported_structures(optimizer::SchwarzOptimizer) = [Plasmo.RECURSIVE_GRAPH_STRUCTURE]
+#NOTE: Optinode solutions will point to the Optimizer solution
+MOI.get(optimizer::Optimizer,attr::MOI.ObjectiveValue) = optimizer.objective_value
+MOI.get(optimizer::Optimizer,attr::MOI.TerminationStatus) = optimizer.status
+MOI.get(optimizer::Optimizer,attr::MOI.SolveTime) = optimizer.solve_time
+supported_structures(optimizer::Optimizer) = [Plasmo.RECURSIVE_GRAPH_STRUCTURE]
 
 #TODO
 function _check_valid_overlap()
     #currently requires at least overlap of 1
 end
 
-function _initialize_optimizer!(optimizer::SchwarzOptimizer,
+function _initialize_optimizer!(optimizer::Optimizer,
     graph::OptiGraph,
     overlap_subgraphs::Vector{OptiGraph},
     sub_optimizer::Any,
@@ -226,13 +229,19 @@ function _initialize_optimizer!(optimizer::SchwarzOptimizer,
 end
 
 function _add_subproblem_variable!(subproblem_graph::OptiGraph,incident_variable::VariableRef,idx::Int64)
-    copy_node = @optinode(subproblem_graph)
-    copy_variable = @variable(copy_node)
-    JuMP.set_name(copy_variable,name(incident_variable)*"_copy")
     JuMP.start_value(incident_variable) == nothing ? start = 0 : start = JuMP.start_value(incident_variable)
+    copy_node = @optinode(subproblem_graph)
+    copy_variable = @variable(copy_node,start = start)
+    JuMP.set_name(copy_variable,name(incident_variable)*"_copy")
+    if JuMP.has_lower_bound(incident_variable)
+        JuMP.set_lower_bound(copy_variable,lower_bound(incident_variable))
+    end
+    if JuMP.has_upper_bound(incident_variable)
+        JuMP.set_upper_bound(copy_variable,upper_bound(incident_variable))
+    end
+
     #JuMP.fix(copy_variable,start)
     subproblem_graph.ext[:incident_variable_map][incident_variable] = copy_variable
-    #push!(subproblem.ext[:x_in],copy_variable)
     subproblem_graph.ext[:x_in_map][idx] = copy_variable
     return nothing
 end
@@ -255,8 +264,6 @@ function _add_subproblem_dual_penalty!(subproblem_graph::OptiGraph,link_referenc
     penalty = sum(local_link_variables)
     set_objective_function(subproblem_graph,objective_function(subproblem_graph) - penalty)
     subproblem_graph.ext[:l_in_map][idx] = penalty
-    # push!(subproblem_subgraph.ext[:l_out],link_reference)
-    # subproblem_graph.ext[:dual_multiplier_map][link_reference] = penalty
     return nothing
 end
 
@@ -281,19 +288,17 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
     @assert length(l_in_vals) == length(l_in_inds)
     for (i,idx) in enumerate(x_in_inds)
         variable = subproblem_graph.ext[:x_in_map][idx]
-        JuMP.fix(variable,x_in_vals[i]) #fix variable for this subproblem.  variable should be the copy made for this subgraph
+        JuMP.fix(variable,x_in_vals[i];force = true) #fix variable for this subproblem.  variable should be the copy made for this subgraph
     end
     for (i,idx) in enumerate(l_in_inds)
         penalty = subproblem_graph.ext[:l_in_map][idx]
-        #TODO: just update objective function coefficient
+        #TODO: just update objective function coefficient in the backend.
         JuMP.set_objective_function(subproblem_graph,subproblem_graph.ext[:original_objective] - l_in_vals[i]*penalty)
-        # for (term,coeff) in penalty.terms
-        #     JuMP.set_objective_coefficient(subproblem_graph,term,coeff*l_vals[i])  #This isn't really what we want.  We should be setting the penalty on the dual term.
-        # end
     end
     return nothing
 end
 
+#TODO: more efficient calculations
 function _calculate_objective_value(optimizer)
     obj_val = 0
     for node in all_nodes(optimizer.graph)
@@ -349,14 +354,24 @@ function _calculate_dual_feasibility(optimizer)
     return duf
 end
 
-function Plasmo.optimize!(optimizer::SchwarzOptimizer)
-    println("Optimizing with SchwarzOpt v0.1.0")
-    println("Number of variables: $(num_all_variables(optimizer.graph))")
-    println()
+function Plasmo.optimize!(optimizer::Optimizer)
 
+    println("###########################################################")
+    println("Optimizing with SchwarzOpt v0.1.0 using $(Threads.nthreads()) threads")
+    println("###########################################################")
+    println()
+    println("Number of variables: $(num_all_variables(optimizer.graph))")
+    println("Number of constraints: $(num_all_constraints(optimizer.graph) + num_all_linkconstraints(optimizer.graph))")
+    println("Number of subproblems: $(length(optimizer.subproblem_graphs))")
+    println("Overlap: ")
+    println("Subproblem sizes: $(num_all_variables.(optimizer.subproblem_graphs))")
+
+    println()
     if optimizer.sub_optimizer == nothing
         error("No optimizer set for the subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs")
     end
+
+    start_time = time()
 
     #setup subproblem optimizers
     for subgraph in optimizer.subproblem_graphs
@@ -375,39 +390,50 @@ function Plasmo.optimize!(optimizer::SchwarzOptimizer)
         end
 
         #Do iteration for each subproblem
-        if optimizer.iteration > 1 #don't fix variables in first iteration
-            for subproblem_graph in optimizer.subproblem_graphs
-                x_in_inds = optimizer.x_in_indices[subproblem_graph]
-                l_in_inds = optimizer.l_in_indices[subproblem_graph]
-                x_in_vals = optimizer.x_vals[x_in_inds]
-                l_in_vals = optimizer.l_vals[l_in_inds]
-                SchwarzSolver._update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
+        t1 = @elapsed begin
+            if optimizer.iteration > 1 #don't fix variables in first iteration
+                for subproblem_graph in optimizer.subproblem_graphs
+                    x_in_inds = optimizer.x_in_indices[subproblem_graph]
+                    l_in_inds = optimizer.l_in_indices[subproblem_graph]
+                    x_in_vals = optimizer.x_vals[x_in_inds]
+                    l_in_vals = optimizer.l_vals[l_in_inds]
+                    SchwarzSolver._update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
+                end
             end
         end
+        println(t1)
 
-        Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
-            
-            #Returns primal and dual information we need to communicate to other subproblems
-            xk,lk = SchwarzSolver._do_iteration(subproblem_graph)
+        t2 = @elapsed begin
+            Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
+                #Returns primal and dual information we need to communicate to other subproblems
+                xk,lk = SchwarzSolver._do_iteration(subproblem_graph)
 
-            #Updates primal and dual information for other subproblems.
-            for (idx,val) in xk
-                optimizer.x_vals[idx] = val
-            end
-            for (idx,val) in lk
-                optimizer.l_vals[idx] = val
+                #Updates primal and dual information for other subproblems.
+                for (idx,val) in xk
+                    optimizer.x_vals[idx] = val
+                end
+                for (idx,val) in lk
+                    optimizer.l_vals[idx] = val
+                end
             end
         end
+        println(t2)
+
 
         #Evaluate residuals
         prf = SchwarzSolver._calculate_primal_feasibility(optimizer)
         duf = SchwarzSolver._calculate_dual_feasibility(optimizer)
         #obj = SchwarzSolver._calculate_objective_value(optimizer)
 
-        optimizer.err_pr = norm(prf[:],Inf)
-        optimizer.err_du = norm(duf[:],Inf)
+        t3 = @elapsed begin
+            optimizer.err_pr = norm(prf[:],Inf)
+            optimizer.err_du = norm(duf[:],Inf)
+        end
+        println(t3)
 
-        optimizer.objective_value = value(objective_function(optimizer.graph))
+        #NOTE: This is the wrong way to calculate this
+        #optimizer.objective_value = value(objective_function(optimizer.graph))
+        optimizer.objective_value = 0
 
         push!(optimizer.primal_error_iters,optimizer.err_pr)
         push!(optimizer.dual_error_iters,optimizer.err_du)
@@ -418,14 +444,28 @@ function Plasmo.optimize!(optimizer::SchwarzOptimizer)
             @printf "%4s | %8s | %8s | %8s" "Iter" "Obj" "Prf" "Duf\n"
         end
         @printf("%4i | %7.2e | %7.2e | %7.2e\n",optimizer.iteration,optimizer.objective_value,optimizer.err_pr,optimizer.err_du)
-        for subproblem in optimizer.subproblem_graphs
-            JuMP.set_start_value.(Ref(subproblem),all_variables(subproblem),value.(Ref(subproblem),all_variables(subproblem)))
+
+        t4 = @elapsed begin
+            for subproblem in optimizer.subproblem_graphs
+                JuMP.set_start_value.(Ref(subproblem),all_variables(subproblem),value.(Ref(subproblem),all_variables(subproblem)))
+            end
         end
+        println(t4)
     end
+
     #Point variables to restricted solutions
     for (node,subgraph) in optimizer.node_subgraph_map
         exp_graph = optimizer.expanded_subgraph_map[subgraph]
         backend(node).last_solution_id = exp_graph.id
     end
+
+    optimizer.solve_time =  time() - start_time
+    optimizer.status = termination_status(optimizer.subproblem_graphs[1])
+
+    println()
+    println("Number of Iterations: ",length(optimizer.objective_iters))
+    println("Solution Time: ",optimizer.solve_time)
+    println("EXIT: SchwarzOpt Finished")
+
 
 end
