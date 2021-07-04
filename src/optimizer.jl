@@ -1,4 +1,4 @@
-mutable struct Optimizer <: Plasmo.OptiGraphOptimizer
+mutable struct Optimizer <: MOI.AbstractOptimizer #<: Plasmo.OptiGraphOptimizer
     graph::OptiGraph                                #Subgraphs should not have any overlap and should cover all the nodes
     subproblem_graphs::Vector{OptiGraph}            #These are the expanded subgraphs
     sub_optimizer::Any
@@ -62,25 +62,28 @@ mutable struct Optimizer <: Plasmo.OptiGraphOptimizer
         optimizer.dual_error_iters = Float64[]
         optimizer.objective_iters = Float64[]
 
+        optimizer.plasmo_optimizer_hook = optimize!
+
         return optimizer
     end
 end
 
 function Optimizer(graph::OptiGraph,subgraphs::Vector{OptiGraph};sub_optimizer = nothing,primal_links = [],dual_links = [],tolerance = 1e-6,max_iterations = 100)
     optimizer = Optimizer()
-    _initialize_optimizer!(optimizer,graph,subgraphs,sub_optimizer,primal_links,dual_links,tolerance,max_iterations)
+    _initialize_optimizer!(optimizer,
+    graph,
+    subgraphs,
+    sub_optimizer,
+    primal_links,
+    dual_links,
+    tolerance,
+    max_iterations)
     return optimizer
 end
 
-#NOTE: Optinode solutions will point to the Optimizer solution
-MOI.get(optimizer::Optimizer,attr::MOI.ObjectiveValue) = optimizer.objective_value
-MOI.get(optimizer::Optimizer,attr::MOI.TerminationStatus) = optimizer.status
-MOI.get(optimizer::Optimizer,attr::MOI.SolveTime) = optimizer.solve_time
-supported_structures(optimizer::Optimizer) = [Plasmo.RECURSIVE_GRAPH_STRUCTURE]
-
 #TODO
 function _check_valid_overlap()
-    #currently requires at least overlap of 1
+    #currently SchwarzOpt requires at least an overlap of 1
 end
 
 function _initialize_optimizer!(optimizer::Optimizer,
@@ -126,8 +129,8 @@ function _initialize_optimizer!(optimizer::Optimizer,
     end
 
     #FIND SUBGRAPH BOUNDARIES AND ASSIGN LINKS AS EITHER PRIMAL OR DUAL
-    subgraph_boundary_edges = SchwarzSolver._find_boundaries(graph,optimizer.subproblem_graphs)
-    primal_links,dual_links = SchwarzSolver._assign_links(optimizer.subproblem_graphs,subgraph_boundary_edges,primal_links,dual_links)
+    subgraph_boundary_edges = _find_boundaries(graph,optimizer.subproblem_graphs)
+    primal_links,dual_links = _assign_links(optimizer.subproblem_graphs,subgraph_boundary_edges,primal_links,dual_links)
     optimizer.primal_links = primal_links
     optimizer.dual_links = dual_links
     @assert length(primal_links) == n_subproblems
@@ -169,7 +172,7 @@ function _initialize_optimizer!(optimizer::Optimizer,
             push!(optimizer.l_vals,dual_start)
             idx = length(optimizer.l_vals)
             push!(optimizer.l_in_indices[subproblem_graph],idx)                                #add index to subproblem l inputs
-            SchwarzSolver._add_subproblem_dual_penalty!(subproblem_graph,link_reference,idx)   #add penalty to subproblem objective
+            _add_subproblem_dual_penalty!(subproblem_graph,link_reference,idx)   #add penalty to subproblem objective
 
             #push!(subproblem_graph.ext[:l_in],link_reference)
             #subproblem_graph.ext[:l_in][idx] = link_reference
@@ -219,11 +222,11 @@ function _initialize_optimizer!(optimizer::Optimizer,
                 end
                 #If this subproblem needs to make a local copy of the incident variable
                 if !(incident_variable in keys(subproblem_graph.ext[:incident_variable_map]))
-                    SchwarzSolver._add_subproblem_variable!(subproblem_graph,incident_variable,idx)
+                    _add_subproblem_variable!(subproblem_graph,incident_variable,idx)
                     push!(optimizer.x_in_indices[subproblem_graph],idx)
                 end
             end
-            SchwarzSolver._add_subproblem_constraint!(subproblem_graph,link_reference)                                    #Add link constraint to the subproblem. This problem "owns" the constraint
+            _add_subproblem_constraint!(subproblem_graph,link_reference)                                    #Add link constraint to the subproblem. This problem "owns" the constraint
         end
     end
 end
@@ -298,7 +301,7 @@ function _update_subproblem!(subproblem_graph::OptiGraph,x_in_vals::Vector{Float
     return nothing
 end
 
-#TODO: more efficient calculations
+#TODO: more efficient calculations.  This is bottlenecking
 function _calculate_objective_value(optimizer)
     obj_val = 0
     for node in all_nodes(optimizer.graph)
@@ -309,7 +312,7 @@ function _calculate_objective_value(optimizer)
     return obj_val
 end
 
-#TODO: figure out these mappings ahead of time
+#TODO: figure out these mappings ahead of time.  This is bottlenecking
 function _calculate_primal_feasibility(optimizer)
     linkrefs = getlinkconstraints(optimizer.graph)
     prf = []
@@ -354,7 +357,7 @@ function _calculate_dual_feasibility(optimizer)
     return duf
 end
 
-function Plasmo.optimize!(optimizer::Optimizer)
+function optimize!(optimizer::Optimizer)
 
     println("###########################################################")
     println("Optimizing with SchwarzOpt v0.1.0 using $(Threads.nthreads()) threads")
@@ -371,6 +374,7 @@ function Plasmo.optimize!(optimizer::Optimizer)
         error("No optimizer set for the subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs")
     end
 
+    #TODO: use a profiler
     start_time = time()
 
     #setup subproblem optimizers
@@ -397,7 +401,7 @@ function Plasmo.optimize!(optimizer::Optimizer)
                     l_in_inds = optimizer.l_in_indices[subproblem_graph]
                     x_in_vals = optimizer.x_vals[x_in_inds]
                     l_in_vals = optimizer.l_vals[l_in_inds]
-                    SchwarzSolver._update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
+                    _update_subproblem!(subproblem_graph,x_in_vals,l_in_vals,x_in_inds,l_in_inds)
                 end
             end
         end
@@ -406,7 +410,7 @@ function Plasmo.optimize!(optimizer::Optimizer)
         t2 = @elapsed begin
             Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
                 #Returns primal and dual information we need to communicate to other subproblems
-                xk,lk = SchwarzSolver._do_iteration(subproblem_graph)
+                xk,lk = _do_iteration(subproblem_graph)
 
                 #Updates primal and dual information for other subproblems.
                 for (idx,val) in xk
@@ -421,9 +425,9 @@ function Plasmo.optimize!(optimizer::Optimizer)
 
 
         #Evaluate residuals
-        prf = SchwarzSolver._calculate_primal_feasibility(optimizer)
-        duf = SchwarzSolver._calculate_dual_feasibility(optimizer)
-        #obj = SchwarzSolver._calculate_objective_value(optimizer)
+        prf = _calculate_primal_feasibility(optimizer)
+        duf = _calculate_dual_feasibility(optimizer)
+
 
         t3 = @elapsed begin
             optimizer.err_pr = norm(prf[:],Inf)
@@ -432,6 +436,8 @@ function Plasmo.optimize!(optimizer::Optimizer)
         println(t3)
 
         #NOTE: This is the wrong way to calculate this
+        #TODO: Calculate objective value correctly
+        #obj = _calculate_objective_value(optimizer)
         #optimizer.objective_value = value(objective_function(optimizer.graph))
         optimizer.objective_value = 0
 
@@ -466,6 +472,4 @@ function Plasmo.optimize!(optimizer::Optimizer)
     println("Number of Iterations: ",length(optimizer.objective_iters))
     println("Solution Time: ",optimizer.solve_time)
     println("EXIT: SchwarzOpt Finished")
-
-
 end

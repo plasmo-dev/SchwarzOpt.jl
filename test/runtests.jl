@@ -1,6 +1,6 @@
 using SchwarzSolver
 using Test
 
-@testset "SchwarzSolver.jl" begin
+@testset "SchwarzOpt.jl" begin
     # Write your own tests here.
 end

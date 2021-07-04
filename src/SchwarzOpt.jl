@@ -1,4 +1,4 @@
-module SchwarzSolver
+module SchwarzOpt
 
 using Printf
 using DataStructures

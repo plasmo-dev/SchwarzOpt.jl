@@ -1,7 +1,7 @@
-# SchwarzSolver
+# SchwarzOpt
 
 ## Overview
-SchwarzSolver.jl implements overlapping Schwarz decomposition to graph-structured optimization problems according to this [paper](https://arxiv.org/abs/1810.00491).  
+SchwarzOpt.jl implements overlapping Schwarz decomposition to graph-structured optimization problems according to this [paper](https://arxiv.org/abs/1810.00491).  
 The package works with the graph-based algebraic modeling package [Plasmo.jl](https://github.com/zavalab/Plasmo.jl).
 
 ## Installation
@@ -9,13 +9,13 @@ SchwarzSolver.jl can be installed using the following Julia Pkg command:
 
 ```julia
 using Pkg
-Pkg.add(PackageSpec(url="https://github.com/zavalab/SchwarzSolver.jl.git"))
+Pkg.add(PackageSpec(url="https://github.com/zavalab/SchwarzOpt.jl.git"))
 ```
 
 ## Simple Example
 ```julia
 using Plasmo, KaHyPar, Ipopt
-using SchwarzSolver
+using SchwarzOpt
 
 T = 3000          #number of time points
 d = sin.(1:T)     #disturbance vector
@@ -29,7 +29,7 @@ graph = OptiGraph()
 for (i,node) in enumerate(state)
     @variable(node,x)
     @constraint(node, x >= 0)
-    @objective(node,Min,0.001*x^2) #- 2*x*d[i])
+    @objective(node,Min,0.001*x^2)
 end
 for node in control
     @variable(node,u)

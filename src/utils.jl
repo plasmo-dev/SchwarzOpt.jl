@@ -71,24 +71,8 @@ function _find_boundaries(optigraph::OptiGraph,subgraphs::Vector{OptiGraph})
     boundary_linkedges_list = []
     for subgraph in subgraphs
         subnodes = all_nodes(subgraph)
-        #overlap_nodes = Plasmo.neighborhood(optigraph,subnodes,overlap)
         boundary_edges = Plasmo.incident_edges(optigraph,subnodes)
         push!(boundary_linkedges_list,boundary_edges)
     end
     return boundary_linkedges_list
 end
-
-
-# TODO: Better Initial dual start
-# Initialize dual values
-# if !(haskey(edge.dual_values,link))
-#     edge.dual_values[link] = 0.0
-# end
-
-# #INPUTS to subproblem
-# if edge.dual_values[link] != nothing
-#     push!(optimizer.l_vals,edge.dual_values[link])
-# else
-#     push!(optimizer.l_vals,0.0)  #initial dual value
-# end
-# Just grab the dual start on the edges
