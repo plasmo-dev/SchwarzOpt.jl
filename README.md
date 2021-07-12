@@ -5,7 +5,7 @@ SchwarzOpt.jl implements overlapping Schwarz decomposition to graph-structured o
 The package works with the graph-based algebraic modeling package [Plasmo.jl](https://github.com/zavalab/Plasmo.jl).
 
 ## Installation
-SchwarzSolver.jl can be installed using the following Julia Pkg command:
+SchwarzOpt.jl can be installed using the following Julia Pkg command:
 
 ```julia
 using Pkg
