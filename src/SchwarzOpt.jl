@@ -8,12 +8,11 @@ import Base.@kwdef
 
 using MathOptInterface, Plasmo, JuMP
 
-# export schwarz_solve
-
 include("utils.jl")
 
 include("optimizer.jl")
 
-# include("schwarz_solve.jl")
+include("moi.jl")
+
 
 end

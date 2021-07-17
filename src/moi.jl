@@ -13,7 +13,7 @@ MOI.get(optimizer::Optimizer,::Plasmo.OptiGraphOptimizeHook) = optimizer.plasmo_
 MOI.optimize!(optimizer::Optimizer) = error("SchwarzOpt does not yet work directly through MathOptInterface.  The solver currently only supports models created using Plasmo.jl.")
 
 #These are needed to get attach_optimizer and AttributeFromOptimizer to work correctly.
-function MOI.is_empty(optimizer::Optimizer) = optimizer.graph=nothing
+function MOI.is_empty(optimizer::Optimizer) = optimizer.graph==nothing
 #TODO
 MOI.empty!(::Optimizer) = nothing
 MOI.copy_to(dest::Optimizer,src::MOI.ModelLike;kwargs...) = MOIU.default_copy_to(dest,src;kwargs...)
