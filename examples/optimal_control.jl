@@ -1,13 +1,15 @@
-using Plasmo
+#Example demonstrating the use of overlap to solve a long horizon control problem
+using Plasmo, Ipopt
 using KaHyPar
-using Ipopt
-using SchwarzSolver
+using SchwarzOpt
 
-T = 3000          #number of time points
-d = sin.(1:T)    #disturbance vector
-overlap = 5
-imbalance = 0.1
+T = 100              #number of time points
+d = sin.(1:T)        #a disturbance vector
+imbalance = 0.1      #partition imbalance
+distance = 5         #expand distance
+n_parts = 6          #number of partitions
 
+#Create the model (an optigraph)
 graph = OptiGraph()
 @optinode(graph,state[1:T])
 @optinode(graph,control[1:T-1])
@@ -25,16 +27,30 @@ end
 n1 = state[1]
 @constraint(n1,n1[:x] == 0)
 
-@linkconstraint(graph,links[i = 1:T-1], state[i][:x] + control[i][:u] + d[i] == state[i+1][:x])
+for i = 1:T-1
+    @linkconstraint(graph, state[i][:x] + control[i][:u] + d[i] == state[i+1][:x],attach = state[i+1])
+end
 
-#Partition the problem
-hypergraph,hyper_map = gethypergraph(graph) #create hypergraph object based on graph
-partition_vector = KaHyPar.partition(hypergraph,8,configuration = :connectivity,imbalance = imbalance)
+#Partition the optigraph using recrusive bisection over a hypergraph
+hypergraph,hyper_map = hyper_graph(graph) #create hypergraph object based on graph
+
+partition_vector = KaHyPar.partition(hypergraph,n_parts,
+configuration = (@__DIR__)*"/cut_rKaHyPar_sea20.ini",
+imbalance = imbalance)
+
 partition = Partition(hypergraph,partition_vector,hyper_map)
-make_subgraphs!(graph,partition)
+apply_partition!(graph,partition)
 
-#Solve directly with expanded subgraphs
+#Inspect the graph structure. It should be RECURSIVE_GRAPH
+println(Plasmo.graph_structure(graph))
+
+#calculate subproblems using expansion distance
 subgraphs = getsubgraphs(graph)
-expanded_subs = expand.(Ref(graph),subgraphs,Ref(5))
-schwarz_solve(graph,expanded_subs;sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"tol" => 1e-12,"print_level" => 0),max_iterations = 100,tolerance = 1e-10,
-dual_links = [],primal_links = [])
+expanded_subgraphs = Plasmo.expand.(graph,subgraphs,distance)
+sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"print_level" => 0)
+
+#optimize using schwarz overlapping decomposition
+SchwarzOpt.optimize!(graph;
+subgraphs = expanded_subgraphs,
+sub_optimizer = sub_optimizer,
+max_iterations = 50)

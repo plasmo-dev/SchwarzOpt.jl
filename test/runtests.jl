@@ -1,6 +1,6 @@
-using SchwarzSolver
+using SchwarzOpt
 using Test
 
-@testset "SchwarzSolver.jl" begin
-    # Write your own tests here.
+@testset "SchwarzOpt.jl" begin
+    include("test_optimizer.jl")
 end
