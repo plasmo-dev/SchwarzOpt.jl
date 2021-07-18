@@ -1,4 +1,6 @@
-# SchwarzOpt
+[![CI](https://github.com/zavalab/SchwarzOpt.jl/workflows/CI/badge.svg)](https://github.com/zavalab/SchwarzOpt.jl/actions)
+
+# SchwarzOpt.jl
 
 ## Overview
 SchwarzOpt.jl implements overlapping Schwarz decomposition for graph-structured optimization problems using the algorithm outlined in this [paper](https://arxiv.org/abs/1810.00491).  
@@ -70,4 +72,4 @@ max_iterations = 50)
 
 ## Important Notes
 - SchwarzOpt.jl does not yet perform automatic overlap improvement.  This means the user needs to provide sufficient overlap such that the optimizer converges.
-- Convergence may fail if the user provides non-contiguous subproblems (partitions), which means a subproblem contains distinct sets of unconnected nodes. 
+- Convergence may fail if the user provides non-contiguous subproblems (partitions), which means a subproblem contains distinct sets of unconnected nodes.
