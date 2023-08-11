@@ -28,7 +28,7 @@ n1 = state[1]
 @constraint(n1,n1[:x] == 0)
 
 for i = 1:T-1
-    @linkconstraint(graph, state[i][:x] + control[i][:u] + d[i] == state[i+1][:x],attach = state[i+1])
+    @linkconstraint(graph, state[i][:x] + control[i][:u] + d[i] == state[i+1][:x], attach = state[i+1])
 end
 
 #Partition the optigraph using recrusive bisection over a hypergraph
@@ -42,7 +42,7 @@ partition = Partition(hypergraph,partition_vector,hyper_map)
 apply_partition!(graph,partition)
 
 #Inspect the graph structure. It should be RECURSIVE_GRAPH
-println(Plasmo.graph_structure(graph))
+# println(Plasmo.graph_structure(graph))
 
 #calculate subproblems using expansion distance
 subgraphs = getsubgraphs(graph)

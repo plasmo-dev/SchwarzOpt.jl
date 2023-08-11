@@ -3,7 +3,7 @@
 #NOTE: Optinode solutions will point to the Optimizer solution
 MOI.get(optimizer::Optimizer,attr::MOI.ObjectiveValue) = optimizer.objective_value
 MOI.get(optimizer::Optimizer,attr::MOI.TerminationStatus) = optimizer.status
-MOI.get(optimizer::Optimizer,attr::MOI.SolveTime) = optimizer.solve_time
+MOI.get(optimizer::Optimizer,attr::MOI.SolveTimeSec) = optimizer.solve_time
 MOI.optimize!(optimizer::Optimizer) = error("SchwarzOpt does not yet work directly through MathOptInterface.  The solver currently only supports models created using Plasmo.jl.")
 #Plasmo.supported_structures(optimizer::Optimizer) = [Plasmo.RECURSIVE_GRAPH_STRUCTURE]
 
