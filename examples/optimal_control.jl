@@ -49,8 +49,20 @@ subgraphs = getsubgraphs(graph)
 expanded_subgraphs = Plasmo.expand.(graph,subgraphs,distance)
 sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer,"print_level" => 0)
 
+
+
+optimizer = SchwarzOpt.Optimizer(
+    graph,
+    expanded_subgraphs; 
+    sub_optimizer=sub_optimizer, 
+    max_iterations=50,
+    mu=1.0
+)
+SchwarzOpt._initialize_optimizer!(optimizer)
+
 #optimize using schwarz overlapping decomposition
-SchwarzOpt.optimize!(graph;
-subgraphs = expanded_subgraphs,
-sub_optimizer = sub_optimizer,
-max_iterations = 50)
+# SchwarzOpt.optimize!(graph;
+# subgraphs = expanded_subgraphs,
+# sub_optimizer = sub_optimizer,
+# max_iterations = 50
+# )

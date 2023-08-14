@@ -1,5 +1,4 @@
-utils2.jl#TODO: Update internal expand
-function _expand_subgraphs(graph::OptiGraph,overlap::Int64)
+function _expand_subgraphs(graph::OptiGraph, overlap::Int64)
     subproblem_graphs = []
     boundary_linkedges_list = []
     hypergraph,hyper_map = gethypergraph(graph)
@@ -32,7 +31,7 @@ function _expand_subgraphs(graph::OptiGraph,overlap::Int64)
     return subproblem_graphs,boundary_linkedges_list
 end
 
-#Links can be formulated as either constraints or penalties
+# collect linkconstraints on boundary edges
 function _gather_links(subgraphs, subgraph_boundary_edges)
     subgraph_links = []
     for (i,edge_set) in enumerate(subgraph_boundary_edges)
@@ -48,8 +47,8 @@ function _gather_links(subgraphs, subgraph_boundary_edges)
     return subgraph_links
 end
 
-#Find boundary edges of expanded subgraphs
-function _find_boundaries(optigraph::OptiGraph,subgraphs::Vector{OptiGraph})
+# find boundary edges of expanded subgraphs
+function _find_boundaries(optigraph::OptiGraph, subgraphs::Vector{OptiGraph})
     boundary_linkedges_list = []
     for subgraph in subgraphs
         subnodes = all_nodes(subgraph)
