@@ -18,6 +18,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     max_iterations::Int64
 
     node_subgraph_map::Dict                       # map optinodes to "owning" subgraph
+    edge_subgraph_map::Dict
     expanded_subgraph_map::Dict
     incident_variable_map::Dict                   # map variable indices in optigraphs to ghost (copy) variables
     incident_constraint_map::Dict
@@ -46,6 +47,7 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
 
         optimizer.subproblem_graphs = Vector{OptiGraph}()
         optimizer.node_subgraph_map = Dict()
+        optimizer.edge_subgraph_map = Dict()
         optimizer.expanded_subgraph_map = Dict()
         optimizer.subproblem_links = Vector{Vector{LinkConstraintRef}}()
 
@@ -105,6 +107,7 @@ function _check_valid_subgraphs(graph::OptiGraph,subgraphs::Vector{OptiGraph})
     #TODO: check for overlap of at least 1.
 
     #TODO: check for non-contiguous partitions and raise warning if they are not
+    
     return true
 end
 
@@ -126,6 +129,9 @@ function _initialize_optimizer!(optimizer::Optimizer)
         for sub in original_subgraphs
             for node in all_nodes(sub)
                 optimizer.node_subgraph_map[node] = sub
+            end
+            for edge in all_edges(sub)
+                optimizer.edge_subgraph_map[edge] = sub
             end
         end
 
@@ -151,9 +157,9 @@ function _initialize_optimizer!(optimizer::Optimizer)
         for (i,subgraph) in enumerate(optimizer.subproblem_graphs)
             # initialize primal-dual maps
             subgraph.ext[:x_map] = Dict{Int64,VariableRef}()
-            subgraph.ext[:x_idx_map] = Dict{VariableRef,Int64}()
+            #subgraph.ext[:x_idx_map] = Dict{VariableRef,Int64}()
             subgraph.ext[:l_map] = Dict{Int64,LinkConstraintRef}()
-            subgraph.ext[:l_idx_map] = Dict{LinkConstraintRef,Int64}()
+            #subgraph.ext[:l_idx_map] = Dict{LinkConstraintRef,Int64}()
             subgraph.ext[:incident_links] = optimizer.subproblem_links[i]
 
             # set original subproblem objective function
@@ -187,14 +193,14 @@ function _initialize_optimizer!(optimizer::Optimizer)
                         incident_node = getnode(incident_variable)                                    # get the node for this external variable
                         original_subgraph = optimizer.node_subgraph_map[incident_node]                # get the restricted subgraph
                         exp_subgraph = optimizer.expanded_subgraph_map[original_subgraph]             # get the subproblem that owns this external variable
-                        exp_subgraph.ext[:x_idx_map][incident_variable] = idx
+                        #exp_subgraph.ext[:x_idx_map][incident_variable] = idx
                         exp_subgraph.ext[:x_map][idx] = incident_variable                             # this graph is used to calculate this variable
                     end
                 end
 
                 # build dual information map
                 if !(link_reference in keys(optimizer.incident_constraint_map))
-                    dual_start = 0
+                    dual_start = 0.0
                     push!(optimizer.l_vals, dual_start)
                     idx = length(optimizer.l_vals)
                     optimizer.incident_constraint_map[link_reference] = idx
@@ -202,14 +208,20 @@ function _initialize_optimizer!(optimizer::Optimizer)
                     link = constraint_object(link_reference)
                     vars = collect(keys(link.func.terms))                                     
 
-                    # we use the attached node to determine which subproblem updates the dual
-                    incident_node = Plasmo.attached_node(link)                                         #this is the owning node for the link
-                    
-                    # NOTE: I don't think it matters if the attached node is in the subproblem, we just grab the 'owning' subgraph regardless
-                    # @assert !(incident_node in all_nodes(subproblem_graph))
-                    original_subgraph = optimizer.node_subgraph_map[incident_node]                     #get the restricted subgraph
+                    # we used to use the attached node to determine which subproblem updates the dual
+                    # attached = Plasmo.attached_node(link)                                         #this is the owning node for the link
+                    # original_subgraph = optimizer.node_subgraph_map[attached]                     #get the restricted subgraph
+
+                    # if the edge is contained inside a subgraph
+                    if !(link_reference in linkconstraints(graph))
+                        original_subgraph = optimizer.edge_subgraph_map[link_reference.optiedge]
+                    else 
+                        # the edge needs to be absorbed into one of the subgraphs
+                        node = getnodes(link_reference)[1]
+                        original_subgraph = optimizer.node_subgraph_map[node]
+                    end
                     exp_subgraph = optimizer.expanded_subgraph_map[original_subgraph]                  #the subproblem that "owns" this link_constraint
-                    exp_subgraph.ext[:l_idx_map][link_reference] = idx
+                    #exp_subgraph.ext[:l_idx_map][link_reference] = idx
                     exp_subgraph.ext[:l_map][idx] = link_reference                                     # this graph is used to calculate this dual
                 end
             end
@@ -219,6 +231,7 @@ function _initialize_optimizer!(optimizer::Optimizer)
 end
 
 function _update_subproblem!(optimizer, subproblem_graph::OptiGraph)
+    set_objective_function(subproblem_graph, subproblem_graph.ext[:original_objective])
     for link in subproblem_graph.ext[:incident_links]
         _formulate_penalty!(optimizer, subproblem_graph, link)
     end
@@ -241,11 +254,14 @@ function _formulate_penalty!(optimizer, subproblem_graph::OptiGraph, link_refere
     l_link = optimizer.l_vals[l_idx]
 
     rhs = link.set.value
+
     penalty = local_link_coeffs'*local_link_variables + external_coeffs'*external_values - rhs
     augmented_penalty = penalty^2
 
-    # TODO: add to objective instead of reset
-    set_objective_function(subproblem_graph, subproblem_graph.ext[:original_objective] - l_link*penalty + 0.5*optimizer.mu*augmented_penalty)
+    # TODO: use `add_to_expression!` since it should be more efficient. the following lines do not work however.
+    #JuMP.add_to_expression!(objective_function(subproblem_graph), -1, l_link*penalty)
+    #JuMP.add_to_expression!(objective_function(subproblem_graph), 0.5*optimizer.mu, augmented_penalty)
+    set_objective_function(subproblem_graph, objective_function(subproblem_graph) - l_link*penalty + 0.5*optimizer.mu*augmented_penalty)
     return nothing
 end
 
@@ -298,18 +314,19 @@ function _calculate_dual_feasibility(optimizer)
         for node in getnodes(linkcon)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
-            push!(graphs,subproblem_graph)
+            push!(graphs, subproblem_graph)
         end
 
         #check each subproblem's dual value for this linkconstraint
         graphs = unique(graphs)
         for subproblem_graph in graphs
             l_val = dual(subproblem_graph, linkref)   
-            push!(duals,l_val)
+            push!(duals, l_val)
         end
 
         # dual residual between subproblems
-        dual_res = maximum(diff(duals))#lambdas[1] - lambdas[2]
+        dual_res = abs(maximum(duals) - minimum(duals))
+        #dual_res = maximum(diff(duals)) #lambdas[1] - lambdas[2]
         push!(duf, dual_res)
     end
     return duf
@@ -397,6 +414,7 @@ function optimize!(optimizer::Optimizer)
         end
     end
 
+
     #Point variables to restricted solutions
     for (node,subgraph) in optimizer.node_subgraph_map
         subproblem_graph = optimizer.expanded_subgraph_map[subgraph]
@@ -409,8 +427,10 @@ function optimize!(optimizer::Optimizer)
     end
     # optimizer.graph.optimizer = optimizer
     println()
-    println("Number of Iterations: ",length(optimizer.iteration))
-
+    println("Number of Iterations: ",optimizer.iteration)
+    @printf "%8s | %8s | %8s" "Obj" "Prf" "Duf\n"
+    @printf("%7.2e | %7.2e | %7.2e\n",_calculate_objective_value(optimizer),optimizer.err_pr,optimizer.err_du)
+    println()
     println("Time spent in subproblems: ",optimizer.timers.solve_subproblem_time)
     println("Solution Time: ",optimizer.timers.total_time)
     println("EXIT: SchwarzOpt Finished with status: ",optimizer.status)
@@ -427,7 +447,7 @@ function optimize!(
     sub_optimizer = Ipopt.Optimizer,
     overlap = 1,
     max_iterations = 50,
-    mu=1.0
+    mu=100.0
 )
 
     if length(subgraphs) == 0
