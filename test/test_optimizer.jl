@@ -1,3 +1,3 @@
-include((@__DIR__)*"/../examples/optimal_control.jl")
+include((@__DIR__) * "/../examples/optimal_control.jl")
 
-@test termination_status(graph) == MOI.LOCALLY_SOLVED || termination_status(graph) == MOI.ITERATION_LIMIT
+@test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.LOCALLY_SOLVED
