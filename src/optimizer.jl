@@ -302,8 +302,8 @@ function _do_iteration(subproblem_graph::OptiGraph)
     x_sub = subproblem_graph.ext[:x_map]           # primal variables to update
     l_sub = subproblem_graph.ext[:l_map]           # dual variables to update
 
-    xk = Dict(key => value(subproblem_graph, val) for (key, val) in x_sub)
-    lk = Dict(key => dual(subproblem_graph, val) for (key, val) in l_sub)
+    xk = Dict(key => value(val) for (key, val) in x_sub)
+    lk = Dict(key => dual(val) for (key, val) in l_sub)
 
     return xk, lk
 end
@@ -327,7 +327,7 @@ function _calculate_primal_feasibility(optimizer)
             node = optinode(term)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
-            val += coeff * value(subproblem_graph, term)
+            val += coeff * value(term)
         end
         push!(prf, val - linkcon.set.value)
     end
@@ -457,7 +457,7 @@ function optimize!(optimizer::Optimizer)
                 JuMP.set_start_value.(
                     Ref(subproblem),
                     all_variables(subproblem),
-                    value.(Ref(subproblem), all_variables(subproblem)),
+                    value.(all_variables(subproblem)),
                 )
             end
         end
