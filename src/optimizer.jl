@@ -291,13 +291,15 @@ end
 function _do_iteration(subproblem_graph::OptiGraph)
     Plasmo.optimize!(subproblem_graph)
     term_status = termination_status(subproblem_graph)
+    # Create label of subproblem_graph by concatenating labels of optinodes
+    label = join(map(x -> x.label, all_nodes(subproblem_graph)), "_")
     !(
         term_status in [
             MOI.TerminationStatusCode(4),
             MOI.TerminationStatusCode(1),
             MOI.TerminationStatusCode(10),
         ]
-    ) && @warn("Suboptimal solution detected for subproblem with status $term_status")
+    ) && @warn("Suboptimal solution detected for subproblem with status $term_status: $label")
 
     x_sub = subproblem_graph.ext[:x_map]           # primal variables to update
     l_sub = subproblem_graph.ext[:l_map]           # dual variables to update
@@ -323,13 +325,20 @@ function _calculate_primal_feasibility(optimizer)
         val = 0
         linkcon = constraint_object(linkref)
         terms = linkcon.func.terms
-        for (term, coeff) in terms
-            node = optinode(term)
-            graph = optimizer.node_subgraph_map[node]
-            subproblem_graph = optimizer.expanded_subgraph_map[graph]
-            val += coeff * value(term)
+        try
+            for (term, coeff) in terms
+                node = optinode(term)
+                graph = optimizer.node_subgraph_map[node]
+                subproblem_graph = optimizer.expanded_subgraph_map[graph]
+                val += coeff * value(term)
+            end
+            push!(prf, val - linkcon.set.value)
+        catch
+            println("Error in calculating primal feasibility for linkconstraint: $linkcon")
+            println("linkcon.set: $(linkcon.set)")
+            println("linkcon.func: $(linkcon.func)")
+            println("linkcon.func.terms: $(linkcon.func.terms)")
         end
-        push!(prf, val - linkcon.set.value)
     end
     return prf
 end
@@ -403,7 +412,8 @@ function optimize!(optimizer::Optimizer)
 
         #Do iteration for each subproblem
         optimizer.timers.update_subproblem_time += @elapsed begin
-            for subproblem_graph in optimizer.subproblem_graphs
+            for (i_sp, subproblem_graph) in enumerate(optimizer.subproblem_graphs)
+                println("Updating subproblem $i_sp")
                 _update_subproblem!(optimizer, subproblem_graph)
             end
         end

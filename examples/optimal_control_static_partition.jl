@@ -3,17 +3,17 @@
 using Plasmo, Ipopt
 using SchwarzOpt
 
-T = 200             # number of time points
+T = 8             # number of time points
 d = sin.(1:T)       # a disturbance vector
 imbalance = 0.1     # partition imbalance
 distance = 2        # expand distance
-n_parts = 10        # number of partitions
+n_parts = 5        # number of partitions
 
 # Create the model (an optigraph)
-graph = OptiGraph()
+graph_schwarz = OptiGraph()
 
-@optinode(graph, state[1:T])
-@optinode(graph, control[1:(T-1)])
+@optinode(graph_schwarz, state[1:T])
+@optinode(graph_schwarz, control[1:(T-1)])
 
 for (i, node) in enumerate(state)
     @variable(node, x)
@@ -29,10 +29,10 @@ n1 = state[1]
 @constraint(n1, n1[:x] == 0)
 
 for i in 1:(T-1)
-    @linkconstraint(graph, state[i][:x] + control[i][:u] + d[i] == state[i+1][:x])
+    @linkconstraint(graph_schwarz, state[i][:x] + control[i][:u] + d[i] == state[i+1][:x])
 end
 
-hypergraph, hyper_map = hyper_graph(graph) # create hypergraph object based on graph
+hypergraph, hyper_map = hyper_graph(graph_schwarz) # create hypergraph object based on graph
 # Create an equally sized partition based on the number of time points and number of partitions.
 N_node = 2 * T - 1
 partition_vector = repeat(1:n_parts, inner=N_node ÷ n_parts)
@@ -41,18 +41,20 @@ if remaining > 0
     partition_vector = [partition_vector; repeat(1:remaining)]
 end
 
+
 # apply partition to graph
 partition = Partition(hypergraph, partition_vector, hyper_map)
-apply_partition!(graph, partition)
-
+##
+@run apply_partition!(graph_schwarz, partition)
+##
 # calculate subproblems using expansion distance
-subs = subgraphs(graph)
-expanded_subgraphs = Plasmo.expand.(graph, subs, distance)
+subs = subgraphs(graph_schwarz)
+expanded_subgraphs = Plasmo.expand.(graph_schwarz, subs, distance)
 sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
 
 # optimize using schwarz overlapping decomposition
 optimizer = SchwarzOpt.optimize!(
-    graph;
+    graph_schwarz;
     subgraphs=expanded_subgraphs,
     sub_optimizer=sub_optimizer,
     max_iterations=100,
