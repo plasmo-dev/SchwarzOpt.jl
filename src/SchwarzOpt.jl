@@ -11,6 +11,6 @@ include("utils.jl")
 
 include("optimizer.jl")
 
-include("moi.jl")
+include("interface.jl")
 
 end

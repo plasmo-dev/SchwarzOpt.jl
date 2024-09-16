@@ -9,179 +9,221 @@
     total_time::Float64 = 0.0
 end
 
+@kwdef mutable struct Options
+    tolerance::Float64=1e-4
+    max_iterations::Int64=100
+    mu::Float64=1.0
+end
+
 mutable struct Optimizer <: MOI.AbstractOptimizer
-    graph::OptiGraph                              # Subgraphs should not have any overlap and should cover all the nodes
-    subproblem_graphs::Vector{OptiGraph}          # These are expanded subgraphs (i.e. subgraphs with overlap)
+    graph::OptiGraph
+    subproblem_graphs::Vector{OptiGraph}
+    subproblem_optimizer::Any
 
-    sub_optimizer::Any
-    tolerance::Float64
-    max_iterations::Int64
+    # algorithm options
+    options::Options
 
-    node_subgraph_map::Dict                       # map optinodes to "owning" subgraph
+    # mapping information
+    node_subgraph_map::Dict         # map optinodes to "owning" subgraph
     edge_subgraph_map::Dict
     expanded_subgraph_map::Dict
-    incident_variable_map::Dict                   # map variable indices in optigraphs to ghost (copy) variables
+    incident_variable_map::Dict     # map variable indices in optigraphs to ghost variables
     incident_constraint_map::Dict
-    subproblem_links::Vector                      # link constraints that do dual updates
+    subproblem_links::Vector        # link constraints that require dual updates
 
-    x_vals::Vector{Float64}                       # current primal values that get communicated to subproblems
-    l_vals::Vector{Float64}                       # current dual values that get communicated to subproblems
-
+    # current status
+    initialized::Bool
     status::MOI.TerminationStatusCode
     err_pr::Float64
     err_du::Float64
-    objective_value::Float64
+    objective_value::Union{Nothing,Float64}
 
+    # current primal and dual values that get communicated to subproblems
+    x_vals::Vector{Float64}
+    l_vals::Vector{Float64}
+
+    # algorithm iteration outputs
     iteration::Int64
     primal_error_iters::Vector{Float64}
     dual_error_iters::Vector{Float64}
     objective_iters::Vector{Float64}
     solve_time::Float64
 
+    # timers
     timers::Timers
-    loaded::Bool
-    mu::Float64
 
+    # partial initializer
     function Optimizer()
         optimizer = new()
-
-        optimizer.subproblem_graphs = Vector{OptiGraph}()
+    
+        # mapping information
         optimizer.node_subgraph_map = Dict()
         optimizer.edge_subgraph_map = Dict()
         optimizer.expanded_subgraph_map = Dict()
-        optimizer.subproblem_links = Vector{Vector{LinkConstraintRef}}()
-
+        # optimizer.subproblem_links = Vector{Vector{Plasmo.EdgeConstraintRef}}()
         optimizer.incident_variable_map = OrderedDict()
         optimizer.incident_constraint_map = OrderedDict()
 
-        optimizer.x_vals = Vector{Float64}()  #Primal values for communication
-        optimizer.l_vals = Vector{Float64}()  #Dual values for communication
-
+        # current status
+        optimizer.initialized = false
+        optimizer.status = MOI.OPTIMIZE_NOT_CALLED
         optimizer.err_pr = Inf
         optimizer.err_du = Inf
-        optimizer.objective_value = 0
-        optimizer.status = MOI.OPTIMIZE_NOT_CALLED
+        optimizer.objective_value = nothing
+        optimizer.x_vals = Vector{Float64}()  # primal values for communication
+        optimizer.l_vals = Vector{Float64}()  # dual values for communication
+        
+        # iteration output
         optimizer.iteration = 0
         optimizer.primal_error_iters = Float64[]
         optimizer.dual_error_iters = Float64[]
         optimizer.objective_iters = Float64[]
 
+        # timers
         optimizer.timers = Timers()
-        optimizer.loaded = false
-
         return optimizer
     end
 end
 
 function Optimizer(
     graph::OptiGraph,
-    subgraphs::Vector{OptiGraph};
-    sub_optimizer=nothing,
+    subproblem_graphs::Vector{OptiGraph};
+    subproblem_optimizer=nothing,
     tolerance=1e-6,
     max_iterations=100,
     mu=1.0,
 )
     optimizer = Optimizer()
-    for subgraph in subgraphs
-        sub = Plasmo.optigraph_reference(subgraph)
-        push!(optimizer.subproblem_graphs, sub)
-    end
-
     optimizer.graph = graph
-    optimizer.sub_optimizer = sub_optimizer
-    optimizer.tolerance = tolerance
-    optimizer.max_iterations = max_iterations
-    optimizer.mu = mu
-
+    optimizer.options = Options(tolerance, max_iterations, mu)
+    optimizer.subproblem_graphs = subproblem_graphs
+    optimizer.subproblem_optimizer = subproblem_optimizer
     return optimizer
 end
 
-function _check_valid_subgraphs(graph::OptiGraph, subgraphs::Vector{OptiGraph})
+# function Optimizer(
+#     graph::OptiGraph,
+#     partition::Plasmo.Partition,
+#     tolerance::Float64=1e-4,
+#     max_iterations::Int64=100,
+#     mu::Float64=1.0
+# )
+#     optimizer = Optimizer()
+#     optimizer.graph = graph
+#     optimizer.options = Options(tolerance, max_iterations, mu)
+
+# end
+
+function _check_valid_subproblems(optimizer::Optimizer)
+    graph = optimizer.graph
+    subgraphs = optimizer.subproblem_graphs
     subgraph_nodes = union(all_nodes.(subgraphs)...)
-    length(subgraph_nodes) == num_all_nodes(graph) || error(
-        "Invalid subgraphs given to optimizer.  The number of nodes in subgraphs does not match the number of nodes
-in the optigraph.",
-    )
+
+    # check number of nodes makes sense
+    length(subgraph_nodes) == num_nodes(graph) || 
+        error(
+        """
+        Invalid subgraph problems given to optimizer. The number of nodes in 
+        subgraphs does not match the number of nodes in the optigraph.
+        """
+        )
+
     all((node) -> node in all_nodes(graph), subgraph_nodes) ||
-        error("Invalid subgraphs given to optimizer.  At least one provided subgraph
-constrains an optinode that is not in the optigraph.")
+        error(
+            """
+            Invalid subgraphs given to optimizer.  At least one provided subgraph
+            constrains an optinode that is not in the optigraph.
+            """
+        )
 
     #TODO: check for overlap of at least 1.
+    # _check_overlap
 
-    #TODO: check for non-contiguous partitions and raise warning if they are not
+    #TODO: raise warning for non-contiguous partitions
+    # _check_partitions
 
     return true
 end
 
-function _initialize_optimizer!(optimizer::Optimizer)
-    if optimizer.sub_optimizer == nothing
+function _build_restricted_objective(subgraph::OptiGraph)
+    return sum(objective_function(node) for node in all_nodes(subgraph))
+end
+
+# in cases where the total graph objective is not separable, we can use duplicate variables.
+function _parse_non_separable_objective(objective_function)
+end
+
+function initialize!(optimizer::Optimizer)
+    if optimizer.subproblem_optimizer == nothing
         error(
             "No optimizer set for the subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs",
         )
     end
 
     return optimizer.timers.initialize_time = @elapsed begin
+        _check_valid_subgraphs(optimizer)
         graph = optimizer.graph
         overlap_subgraphs = optimizer.subproblem_graphs
+        n_subproblems = length(overlap_subgraphs)
 
-        _check_valid_subgraphs(graph, overlap_subgraphs)
-        n_subproblems = length(optimizer.subproblem_graphs)
-
-        #MAP OPTINODES TO ORIGNAL SUBGRAPHS
-        original_subgraphs = subgraphs(graph)
-        for sub in original_subgraphs
-            for node in all_nodes(sub)
-                optimizer.node_subgraph_map[node] = sub
+        # map optinodes to their original subgraphs
+        original_subgraphs = local_subgraphs(graph)
+        for subgraph in original_subgraphs
+            for node in all_nodes(subgraph)
+                optimizer.node_subgraph_map[node] = subgraph
             end
-            for edge in all_edges(sub)
-                optimizer.edge_subgraph_map[edge] = sub
+            for edge in all_edges(subgraph)
+                optimizer.edge_subgraph_map[edge] = subgraph
             end
         end
 
-        # map subgraphs to their expanded subproblems
-        for i in 1:length(optimizer.subproblem_graphs)
+        # reformulate objective function if necessary
+        # node_objectives = parse_graph_objective_to_nodes(graph)
+
+        # map subgraphs to their expanded subgraphs
+        for i in 1:length(overlap_subgraphs)
             original_subgraph = original_subgraphs[i]
-            expanded_subgraph = optimizer.subproblem_graphs[i]
-            @assert intersect(all_nodes(original_subgraph), all_nodes(expanded_subgraph)) ==
-                all_nodes(original_subgraph)
+            expanded_subgraph = overlap_subgraphs[i]
+
+            # check subgraphs are valid
+            @assert intersect(
+                all_nodes(original_subgraph), 
+                all_nodes(expanded_subgraph)
+            ) == all_nodes(original_subgraph)
+
             optimizer.expanded_subgraph_map[original_subgraph] = expanded_subgraph
             expanded_subgraph.ext[:restricted_subgraph] = original_subgraph
-            expanded_subgraph.ext[:restricted_objective] = sum(
-                objective_function(node) for node in all_nodes(original_subgraph)
+
+            # TODO: make sure we actually have the node objectives
+            expanded_subgraph.ext[:restricted_objective] = _build_restricted_objective(
+                original_subgraph
             )
         end
 
         # gather the boundary links for each subproblem
-        subgraph_boundary_edges = _find_boundaries(graph, optimizer.subproblem_graphs)
+        subgraph_boundary_edges = _find_boundaries(graph, overlap_subgraphs)
         subproblem_links = _gather_links(
-            optimizer.subproblem_graphs, subgraph_boundary_edges
+            overlap_subgraphs, subgraph_boundary_edges
         )
-        optimizer.subproblem_links = subproblem_links
+        
+        # optimizer.subproblem_links = subproblem_links
         @assert length(subproblem_links) == n_subproblems
 
         ########################################################
-        #INITIALIZE SUBPROBLEM DATA
+        # INITIALIZE SUBPROBLEM DATA
         ########################################################
-        for (i, subgraph) in enumerate(optimizer.subproblem_graphs)
+        for (i, subgraph) in enumerate(overlap_subgraphs)
             # initialize primal-dual maps
-            subgraph.ext[:x_map] = Dict{Int64,VariableRef}()
-            #subgraph.ext[:x_idx_map] = Dict{VariableRef,Int64}()
-            subgraph.ext[:l_map] = Dict{Int64,LinkConstraintRef}()
-            #subgraph.ext[:l_idx_map] = Dict{LinkConstraintRef,Int64}()
-            subgraph.ext[:incident_links] = optimizer.subproblem_links[i]
+            subgraph.ext[:x_map] = Dict{Int64,NodeVariableRef}()
+            subgraph.ext[:l_map] = Dict{Int64,EdgeConstraintRef}()
+            subgraph.ext[:incident_links] = subproblem_links[i]
 
-            # set original subproblem objective function
-            JuMP.set_objective(
-                subgraph,
-                MOI.MIN_SENSE,
-                sum(objective_function(node) for node in all_nodes(subgraph)),
-            )
-            obj = objective_function(subgraph)
-            subgraph.ext[:original_objective] = obj
+            Plasmo.set_to_node_objectives(subgraph)
+            subgraph.ext[:original_objective] = objective_function(subgraph)
         end
 
         #######################################################
-        #INITIALIZE SUBPROBLEMS
+        # INITIALIZE SUBPROBLEMS
         #######################################################
         for i in 1:length(optimizer.subproblem_graphs)
             subproblem_graph = optimizer.subproblem_graphs[i]
@@ -206,10 +248,9 @@ function _initialize_optimizer!(optimizer::Optimizer)
                         idx = length(optimizer.x_vals)
                         optimizer.incident_variable_map[incident_variable] = idx
 
-                        incident_node = optinode(incident_variable)                                    # get the node for this external variable
+                        incident_node = optinode(incident_variable)                                   # get the node for this external variable
                         original_subgraph = optimizer.node_subgraph_map[incident_node]                # get the restricted subgraph
                         exp_subgraph = optimizer.expanded_subgraph_map[original_subgraph]             # get the subproblem that owns this external variable
-                        #exp_subgraph.ext[:x_idx_map][incident_variable] = idx
                         exp_subgraph.ext[:x_map][idx] = incident_variable                             # this graph is used to calculate this variable
                     end
                 end
@@ -220,13 +261,8 @@ function _initialize_optimizer!(optimizer::Optimizer)
                     push!(optimizer.l_vals, dual_start)
                     idx = length(optimizer.l_vals)
                     optimizer.incident_constraint_map[link_reference] = idx
-
                     link = constraint_object(link_reference)
                     vars = collect(keys(link.func.terms))
-
-                    # we used to use the attached node to determine which subproblem updates the dual
-                    # attached = Plasmo.attached_node(link)                                         #this is the owning node for the link
-                    # original_subgraph = optimizer.node_subgraph_map[attached]                     #get the restricted subgraph
 
                     # if the edge is contained inside a subgraph
                     if !(link_reference in linkconstraints(graph))
@@ -254,8 +290,13 @@ function _update_subproblem!(optimizer, subproblem_graph::OptiGraph)
     return nothing
 end
 
+"""
+    Formulate penalty term for each subproblem
+"""
 function _formulate_penalty!(
-    optimizer, subproblem_graph::OptiGraph, link_reference::LinkConstraintRef
+    optimizer::Optimizer, 
+    subproblem_graph::OptiGraph, 
+    link_reference::ConstraintRef
 )
     link = constraint_object(link_reference)
     link_variables = collect(keys(link.func.terms))
@@ -299,32 +340,38 @@ function _do_iteration(subproblem_graph::OptiGraph)
         ]
     ) && @warn("Suboptimal solution detected for subproblem with status $term_status")
 
-    x_sub = subproblem_graph.ext[:x_map]           # primal variables to update
-    l_sub = subproblem_graph.ext[:l_map]           # dual variables to update
+    # primal and dual variables to update
+    x_sub = subproblem_graph.ext[:x_map]
+    l_sub = subproblem_graph.ext[:l_map]
 
+    # primal and dual values for this subproblem
     xk = Dict(key => value(subproblem_graph, val) for (key, val) in x_sub)
     lk = Dict(key => dual(subproblem_graph, val) for (key, val) in l_sub)
 
     return xk, lk
 end
 
-function _calculate_objective_value(optimizer)
+function _calculate_objective_value(optimizer::Optimizer)
+    # TODO: this should just be the graph objective value
+    # evaluate the objective function with the current primal
     return sum(
         value(optimizer.subproblem_graphs[i].ext[:restricted_objective]) for
         i in 1:length(optimizer.subproblem_graphs)
     )
 end
 
-#TODO: figure out these mappings ahead of time.  This is bottlenecking
-function _calculate_primal_feasibility(optimizer)
-    linkrefs = linkconstraints(optimizer.graph)
+#TODO: cache mappings ahead of time.  This is bottlenecking.
+function _calculate_primal_feasibility(optimizer::Optimizer)
+    linkrefs = local_link_constraints(optimizer.graph)
     prf = []
     for linkref in linkrefs
         val = 0
         linkcon = constraint_object(linkref)
+
+        # TODO: update for nonlinear links
         terms = linkcon.func.terms
         for (term, coeff) in terms
-            node = optinode(term)
+            node = get_node(term)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
             val += coeff * value(subproblem_graph, term)
@@ -335,15 +382,16 @@ function _calculate_primal_feasibility(optimizer)
 end
 
 #NOTE: Need at least an overlap of one
-function _calculate_dual_feasibility(optimizer)
-    linkrefs = linkconstraints(optimizer.graph)
+function _calculate_dual_feasibility(optimizer::Optimizer)
+    graph = optimizer.graph
+    linkrefs = local_link_constraints(optimizer.graph)
     duf = []
     for linkref in linkrefs
         duals = []
         linkcon = constraint_object(linkref)
 
         graphs = []
-        for node in optinodes(linkcon)
+        for node in collect_nodes(linkcon)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
             push!(graphs, subproblem_graph)
@@ -358,13 +406,12 @@ function _calculate_dual_feasibility(optimizer)
 
         # dual residual between subproblems
         dual_res = abs(maximum(duals) - minimum(duals))
-        #dual_res = maximum(diff(duals)) #lambdas[1] - lambdas[2]
         push!(duf, dual_res)
     end
     return duf
 end
 
-function optimize!(optimizer::Optimizer)
+function run_algorithm!(optimizer::Optimizer)
     if !optimizer.loaded
         println("Initializing SchwarzOpt...")
         _initialize_optimizer!(optimizer)
@@ -388,7 +435,7 @@ function optimize!(optimizer::Optimizer)
     optimizer.timers.start_time = time()
 
     for subgraph in optimizer.subproblem_graphs
-        JuMP.set_optimizer(subgraph, optimizer.sub_optimizer)
+        JuMP.set_optimizer(subgraph, optimizer.subproblem_optimizer)
     end
 
     optimizer.err_pr = Inf
@@ -489,30 +536,29 @@ function optimize!(optimizer::Optimizer)
     return println("EXIT: SchwarzOpt Finished with status: ", optimizer.status)
 end
 
-"""
-    SchwarzOpt.optimize!(graph::OptiGraph;kwargs...)
+# """
+#     SchwarzOpt.optimize!(graph::OptiGraph;kwargs...)
 
-Optimize an optigraph with overlapping schwarz decomposition.
-"""
-function optimize!(
-    graph::OptiGraph;
-    subgraphs=Plasmo.OptiGraph[],
-    sub_optimizer=Ipopt.Optimizer,
-    overlap=1,
-    max_iterations=50,
-    mu=100.0,
-)
-    if length(subgraphs) == 0
-        println("Optimizing with overlap of $overlap")
-        subgraphs = expand(graph, subgraphs, overlap)
-    else
-        println("Optimizing with user provided overlap")
-    end
+# Optimize an optigraph with overlapping schwarz decomposition.
+# """
+# function run_algorithm!(
+#     graph::OptiGraph;,
+#     subproblem_optimizer=Ipopt.Optimizer,
+#     overlap=1,
+#     max_iterations=50,
+#     mu=100.0,
+# )
+#     if length(subgraphs) == 0
+#         println("Optimizing with overlap of $overlap")
+#         subgraphs = expand(graph, subgraphs, overlap)
+#     else
+#         println("Optimizing with user provided overlap")
+#     end
 
-    optimizer = Optimizer(
-        graph, subgraphs; sub_optimizer=sub_optimizer, max_iterations=max_iterations, mu=mu
-    )
+#     optimizer = Optimizer(
+#         graph, subgraphs; subproblem_optimizer=subproblem_optimizer, max_iterations=max_iterations, mu=mu
+#     )
 
-    optimize!(optimizer)
-    return optimizer
-end
+#     run_algorithm!(optimizer)
+#     return optimizer
+# end
