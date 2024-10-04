@@ -1,26 +1,29 @@
-# collect linkconstraints on boundary edges
-function _gather_links(subgraphs, subgraph_boundary_edges)
-    subgraph_links = []
-    for (i, edge_set) in enumerate(subgraph_boundary_edges)
-        links = LinkConstraintRef[]
-        for edge in edge_set
-            linkrefs = edge.linkrefs
-            for linkref in linkrefs
-                push!(links, linkref)
-            end
-        end
-        push!(subgraph_links, links)
-    end
-    return subgraph_links
+"""
+    Collect the constraints associated with a vector of edges
+"""
+function _gather_links(subgraph_boundary_edges::Vector{OptiEdge})
+    # subgraph_links = []
+    # for (i, edge_set) in enumerate(subgraph_boundary_edges)
+    #     links = LinkConstraintRef[]
+    #     for edge in edge_set
+    #         linkrefs = edge.linkrefs
+    #         for linkref in linkrefs
+    #             push!(links, linkref)
+    #         end
+    #     end
+    #     push!(subgraph_links, links)
+    # end
+    # return subgraph_links
+    return all_constraints.(subgraph_boundary_edges)
 end
 
 # find boundary edges of expanded subgraphs
-function _find_boundaries(optigraph::OptiGraph, subgraphs::Vector{OptiGraph})
-    boundary_linkedges_list = []
+function _find_boundaries(graph::OptiGraph, subgraphs::Vector{OptiGraph})
+    boundary_edge_list = []
     for subgraph in subgraphs
         subnodes = all_nodes(subgraph)
-        boundary_edges = Plasmo.incident_edges(optigraph, subnodes)
-        push!(boundary_linkedges_list, boundary_edges)
+        boundary_edges = Plasmo.incident_edges(graph, subnodes)
+        push!(boundary_edge_list, boundary_edges)
     end
     return boundary_linkedges_list
 end
