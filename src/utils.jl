@@ -1,31 +1,37 @@
 """
-    Collect the constraints associated with a vector of edges
-"""
-function _gather_links(subgraph_boundary_edges::Vector{OptiEdge})
-    # subgraph_links = []
-    # for (i, edge_set) in enumerate(subgraph_boundary_edges)
-    #     links = LinkConstraintRef[]
-    #     for edge in edge_set
-    #         linkrefs = edge.linkrefs
-    #         for linkref in linkrefs
-    #             push!(links, linkref)
-    #         end
-    #     end
-    #     push!(subgraph_links, links)
-    # end
-    # return subgraph_links
-    return all_constraints.(subgraph_boundary_edges)
-end
+    _find_boundaries(projection::Plasmo.HyperGraphProjection, subgraphs::Vector{OptiGraph})
 
-# find boundary edges of expanded subgraphs
-function _find_boundaries(graph::OptiGraph, subgraphs::Vector{OptiGraph})
-    boundary_edge_list = []
+    Find the boundary edges given a hypergraph projection and vector of subgraphs.
+"""
+function _find_boundary_edges(
+    projection::Plasmo.HyperGraphProjection, 
+    subgraphs::Vector{OptiGraph}
+)
+    boundary_edge_list = Vector{Vector{OptiEdge}}()
     for subgraph in subgraphs
-        subnodes = all_nodes(subgraph)
-        boundary_edges = Plasmo.incident_edges(graph, subnodes)
+        subgraph_nodes = all_nodes(subgraph)
+        boundary_edges = Plasmo.incident_edges(projection, subgraph_nodes)
         push!(boundary_edge_list, boundary_edges)
     end
-    return boundary_linkedges_list
+    return boundary_edge_list
+end
+
+"""
+    _get_edge_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+
+    Collect the constraints associated with subgraph boundary edges. Return a vector
+    of constraints for each subgraph.
+"""
+function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+    subgraph_boundary_constraints = Vector{Vector{ConstraintRef}}()
+    for edge_vector in subgraph_boundary_edges
+        edge_constraints = Vector{ConstraintRef}()
+        for edge in edge_vector
+            append!(edge_constraints, all_constraints(edge))
+        end
+        push!(subgraph_boundary_constraints, edge_constraints)
+    end
+    return subgraph_boundary_constraints
 end
 
 # function _expand_subgraphs(graph::OptiGraph, overlap::Int64)
