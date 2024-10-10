@@ -155,7 +155,7 @@ function _check_valid_subproblems(optimizer::Optimizer)
     return true
 end
 
-function _initialize_optimizer!(optimizer::Optimizer)
+function initialize!(optimizer::Optimizer)
     if optimizer.subproblem_optimizer == nothing
         error(
             "No optimizer set for the subproblems.  Please provide an optimizer constructor to use to solve subproblem optigraphs",
@@ -288,7 +288,7 @@ function _initialize_optimizer!(optimizer::Optimizer)
                             # if the edge is contained inside a subgraph, use that subgraph
                             original_subgraph = optimizer.edge_subgraph_map[link_edge]
                         else
-                            # the edge needs to be absorbed into a subgraph for duals
+                            # the edge needs to be absorbed into a subgraph for dual calc
                             node = get_node(linked_variables[1])
                             original_subgraph = optimizer.node_subgraph_map[node]
                         end
@@ -306,7 +306,49 @@ function _initialize_optimizer!(optimizer::Optimizer)
     end
 end
 
-function _update_subproblem!(optimizer::Optimizer, subproblem_graph::OptiGraph)
+function _begin_iterations(optimizer::Optimizer)
+    optimizer.timers = Timers()
+    optimizer.timers.start_time = time()
+
+    # initialize subproblems
+    for subgraph in optimizer.subproblem_graphs
+        JuMP.set_optimizer(subgraph, optimizer.subproblem_optimizer)
+    end
+
+    optimizer.err_pr = Inf
+    optimizer.err_du = Inf
+    optimizer.iteration = 0
+
+    return nothing
+end
+
+function do_iteration(optimizer::Optimizer)
+    # do iteration for each subproblem
+    optimizer.timers.update_subproblem_time += @elapsed begin
+        for subproblem_graph in optimizer.subproblem_graphs
+            _update_subproblem(optimizer, subproblem_graph)
+        end
+    end
+
+    optimizer.timers.solve_subproblem_time += @elapsed begin
+        Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
+            # returns primal and dual information to communicate to other subproblems
+            xk, lk = _solve_subproblem(subproblem_graph)
+
+            #Updates primal and dual information for other subproblems.
+            for (idx, x_val) in xk
+                optimizer.x_vals[idx] = x_val
+            end
+            for (idx, l_val) in lk
+                optimizer.l_vals[idx] = l_val
+            end
+        end
+    end
+    return nothing
+end
+
+
+function _update_subproblem(optimizer::Optimizer, subproblem_graph::OptiGraph)
     set_objective_function(subproblem_graph, subproblem_graph.ext[:original_objective])
     for link in subproblem_graph.ext[:incident_links]
         _formulate_penalty!(optimizer, subproblem_graph, link)
@@ -367,7 +409,7 @@ function _formulate_penalty!(
     return nothing
 end
 
-function _do_iteration(subproblem_graph::OptiGraph)
+function _solve_subproblem(subproblem_graph::OptiGraph)
     Plasmo.optimize!(subproblem_graph)
     term_status = Plasmo.termination_status(subproblem_graph)
     !(
@@ -389,19 +431,36 @@ function _do_iteration(subproblem_graph::OptiGraph)
     return xk, lk
 end
 
+### check iteration values
+
 function _calculate_objective_value(optimizer::Optimizer)
-    # TODO: evaluate the total objective function using subgraph solutions
-    # should be same approach as calculating feasibility.
-    return sum(
-        value(objective_function(subgraph)) for subgraph in local_subgraphs(optimizer.graph)
-    )
+    func = Plasmo.objective_function(optimizer.graph)
+
+    # grab variable values from corresponding subproblems
+    vars = Plasmo._extract_variables(func)
+    var_vals = Dict{NodeVariableRef,Float64}()
+    for var in vars
+        node = get_node(var)
+        subgraph = optimizer.node_subgraph_map[node]
+        subproblem_graph = optimizer.expanded_subgraph_map[subgraph]
+        var_vals[var] = Plasmo.value(subproblem_graph, var)
+    end
+    objective_value = Plasmo.value(i -> get(var_vals, i, 0.0), func) 
+    optimizer.objective_value = objective_value
+
+    return nothing
+    # # TODO: evaluate the total objective function using subgraph solutions
+    # # should be same approach as calculating feasibility.
     # return sum(
-    #     value(optimizer.subproblem_graphs[i].ext[:restricted_objective]) for
-    #     i in 1:length(optimizer.subproblem_graphs)
+    #     value(objective_function(subgraph)) for subgraph in local_subgraphs(optimizer.graph)
     # )
+    # # return sum(
+    # #     value(optimizer.subproblem_graphs[i].ext[:restricted_objective]) for
+    # #     i in 1:length(optimizer.subproblem_graphs)
+    # # )
 end
 
-#TODO: cache mappings ahead of time.  This may be bottlenecking.
+#TODO: cache vap_map ahead of time.  This may be bottlenecking.
 """
     _calculate_primal_feasibility(optimizer::Optimizer)
 
@@ -411,7 +470,7 @@ end
 function _calculate_primal_feasibility(optimizer::Optimizer)
     link_constraint_refs = local_link_constraints(optimizer.graph)
     n_link_constraints = length(link_constraint_refs)
-    primal_residual = zeros()
+    primal_residual = zeros(n_link_constraints)
     for i = 1:n_link_constraints
         # get link constraint function and set
         link_ref = link_constraint_refs[i]
@@ -429,7 +488,7 @@ function _calculate_primal_feasibility(optimizer::Optimizer)
             var_vals[var] = Plasmo.value(subproblem_graph, var)
         end
 
-        # evaluate linking constraint using provided variable values
+        # evaluate linking constraint using subproblem variable values
         constraint_value = Plasmo.value(i -> get(var_vals, i, 0.0), func) 
         primal_residual[i] = constraint_value - set.value
     end
@@ -439,37 +498,60 @@ end
 #NOTE: Need at least an overlap of one for this to work
 function _calculate_dual_feasibility(optimizer::Optimizer)
     graph = optimizer.graph
-    linkrefs = local_link_constraints(optimizer.graph)
-    duf = []
-    for linkref in linkrefs
-        duals = []
-        linkcon = constraint_object(linkref)
+    link_constraint_refs = local_link_constraints(optimizer.graph)
+    n_link_constraints = length(link_constraint_refs)
+    dual_residual = zeros(n_link_constraints)
+    for i = 1:n_link_constraints
+        link_ref = link_constraint_refs[i]
+        edge = Plasmo.owner_model(link_ref)
 
-        graphs = []
-        for node in collect_nodes(linkcon)
+        graphs = Set{typeof(optimizer.graph)}()
+        for node in all_nodes(edge)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
             push!(graphs, subproblem_graph)
         end
 
-        #check each subproblem's dual value for this linkconstraint
-        graphs = unique(graphs)
-        for subproblem_graph in graphs
-            l_val = dual(subproblem_graph, linkref)
-            push!(duals, l_val)
+        # check each subproblem's dual value for this linkconstraint
+        duals = zeros(length(graphs))
+        for i = 1:length(graphs)
+            subproblem_graph = graphs[i]
+            duals[i] = dual(subproblem_graph, link_ref)
         end
 
         # dual residual between subproblems
-        dual_res = abs(maximum(duals) - minimum(duals))
-        push!(duf, dual_res)
+        dual_residual[i] = abs(maximum(duals) - minimum(duals))
     end
-    return duf
+    return dual_residual
+end
+
+function _eval_and_save_iteration(optimizer::Optimizer)
+    # evaluate residuals
+    optimizer.timers.eval_primal_feasibility_time += @elapsed prf = _calculate_primal_feasibility(
+        optimizer
+    )
+    optimizer.timers.eval_dual_feasibility_time += @elapsed duf = _calculate_dual_feasibility(
+        optimizer
+    )
+    optimizer.err_pr = norm(prf[:], Inf)
+    optimizer.err_du = norm(duf[:], Inf)
+
+    # eval objective
+    optimizer.timers.eval_objective_time += @elapsed optimizer.objective_value = _calculate_objective_value(
+        optimizer
+    )
+
+    # save iteration data
+    push!(optimizer.primal_error_iters, optimizer.err_pr)
+    push!(optimizer.dual_error_iters, optimizer.err_du)
+    push!(optimizer.objective_iters, optimizer.objective_value)
+    return nothing
 end
 
 function run_algorithm!(optimizer::Optimizer)
     if !optimizer.initialized
         println("Initializing Optimizer...")
-        _initialize_optimizer!(optimizer)
+        initialize!(optimizer)
     end
 
     println("###########################################################")
@@ -486,16 +568,8 @@ function run_algorithm!(optimizer::Optimizer)
     println("Subproblem constraints: $(num_all_constraints.(optimizer.subproblem_graphs))")
     println()
 
-    optimizer.timers = Timers()
-    optimizer.timers.start_time = time()
+    _begin_iterations(optimizer)
 
-    for subgraph in optimizer.subproblem_graphs
-        JuMP.set_optimizer(subgraph, optimizer.subproblem_optimizer)
-    end
-
-    optimizer.err_pr = Inf
-    optimizer.err_du = Inf
-    optimizer.iteration = 0
     while optimizer.err_pr > optimizer.tolerance || optimizer.err_du > optimizer.tolerance
         optimizer.iteration += 1
         if optimizer.iteration > optimizer.max_iterations
@@ -503,46 +577,11 @@ function run_algorithm!(optimizer::Optimizer)
             break
         end
 
-        #Do iteration for each subproblem
-        optimizer.timers.update_subproblem_time += @elapsed begin
-            for subproblem_graph in optimizer.subproblem_graphs
-                _update_subproblem!(optimizer, subproblem_graph)
-            end
-        end
+        do_iteration(optimizer)
 
-        optimizer.timers.solve_subproblem_time += @elapsed begin
-            Threads.@threads for subproblem_graph in optimizer.subproblem_graphs
-                #Returns primal and dual information we need to communicate to other subproblems
-                xk, lk = _do_iteration(subproblem_graph)
+        _eval_and_save_iteration(optimizer)
 
-                #Updates primal and dual information for other subproblems.
-                for (idx, val) in xk
-                    optimizer.x_vals[idx] = val
-                end
-                for (idx, val) in lk
-                    optimizer.l_vals[idx] = val
-                end
-            end
-        end
-
-        #Evaluate residuals
-        optimizer.timers.eval_primal_feasibility_time += @elapsed prf = _calculate_primal_feasibility(
-            optimizer
-        )
-        optimizer.timers.eval_dual_feasibility_time += @elapsed duf = _calculate_dual_feasibility(
-            optimizer
-        )
-        optimizer.err_pr = norm(prf[:], Inf)
-        optimizer.err_du = norm(duf[:], Inf)
-
-        optimizer.timers.eval_objective_time += @elapsed optimizer.objective_value = _calculate_objective_value(
-            optimizer
-        )
-        push!(optimizer.primal_error_iters, optimizer.err_pr)
-        push!(optimizer.dual_error_iters, optimizer.err_du)
-        push!(optimizer.objective_iters, optimizer.objective_value)
-
-        #Print iteration
+        # print iteration
         if optimizer.iteration % 20 == 0 || optimizer.iteration == 1
             @printf "%4s | %8s | %8s | %8s" "Iter" "Obj" "Prf" "Duf\n"
         end
@@ -554,6 +593,7 @@ function run_algorithm!(optimizer::Optimizer)
             optimizer.err_du
         )
 
+        # update start values
         optimizer.timers.update_subproblem_time += @elapsed begin
             for subproblem in optimizer.subproblem_graphs
                 JuMP.set_start_value.(
@@ -565,23 +605,19 @@ function run_algorithm!(optimizer::Optimizer)
         end
     end
 
-    #Point variables to restricted solutions
-    # for (node, subgraph) in optimizer.node_subgraph_map
-    #     subproblem_graph = optimizer.expanded_subgraph_map[subgraph]
-    #     backend(node).last_solution_id = subproblem_graph.id
-    # end
+    # TODO: expose algorithm solution with value and dual.
 
     optimizer.timers.total_time = time() - optimizer.timers.start_time
     if optimizer.status != MOI.ITERATION_LIMIT
-        optimizer.status = termination_status(optimizer.subproblem_graphs[1])
+        optimizer.status = Plasmo.termination_status(optimizer.subproblem_graphs[1])
     end
-    # optimizer.graph.optimizer = optimizer
+
     println()
     println("Number of Iterations: ", optimizer.iteration)
     @printf "%8s | %8s | %8s" "Obj" "Prf" "Duf\n"
     @printf(
         "%7.2e | %7.2e | %7.2e\n",
-        _calculate_objective_value(optimizer),
+        optimizer.objective_value,
         optimizer.err_pr,
         optimizer.err_du
     )
