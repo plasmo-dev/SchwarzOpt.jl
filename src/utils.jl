@@ -1,5 +1,8 @@
 """
-    _find_boundaries(projection::Plasmo.HyperGraphProjection, subgraphs::Vector{OptiGraph})
+    _find_boundary_edges(
+        projection::Plasmo.HyperGraphProjection, 
+        subgraphs::Vector{OptiGraph}
+    )
 
     Find the boundary edges given a hypergraph projection and vector of subgraphs.
 """
@@ -17,7 +20,7 @@ function _find_boundary_edges(
 end
 
 """
-    _get_edge_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+    _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
 
     Collect the constraints associated with subgraph boundary edges. Return a vector
     of constraints for each subgraph.
@@ -34,34 +37,111 @@ function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEd
     return subgraph_boundary_constraints
 end
 
-# function _expand_subgraphs(graph::OptiGraph, overlap::Int64)
-#     subproblem_graphs = []
-#     boundary_linkedges_list = []
-#     hypergraph, hyper_map = gethypergraph(graph)
+function _is_objective_separable(::Number)
+    return true
+end
 
-#     #NOTE: This could all be calculated simultaneously
-#     for subgraph in getsubgraphs(graph)
-#         println("Performing neighborhood expansion...")
-#         subnodes = all_nodes(subgraph)
-#         hypernodes = [hyper_map[node] for node in subnodes]
+function _is_objective_separable(::Plasmo.NodeVariableRef)
+    return true
+end
 
-#         #Return new hypernodes and hyperedges covered through the expansion.
-#         overlap_hnodes = Plasmo.neighborhood(hypergraph, hypernodes, overlap)
-#         overlap_hedges = Plasmo.induced_edges(hypergraph, overlap_hnodes)
-#         boundary_hedges = Plasmo.incident_edges(hypergraph, overlap_hnodes)
+function _is_objective_separable(::Plasmo.GenericAffExpr{<:Number,NodeVariableRef})
+    return true
+end
 
-#         overlap_nodes = [hyper_map[node] for node in overlap_hnodes]
-#         overlap_edges = [hyper_map[edge] for edge in overlap_hedges]
-#         boundary_edges = [hyper_map[edge] for edge in boundary_hedges]
+function _is_objective_separable(
+    func::Plasmo.GenericQuadExpr{<:Number,NodeVariableRef},
+)
+    # check each term; make sure they are all on the same subproblem
+    for term in Plasmo.quad_terms(func)
+        # term = (coefficient, variable_1, variable_2)
+        node1 = get_node(term[2])
+        node2 = get_node(term[3])
+        
+        # if any term is split across nodes, the objective is not separable
+        if node1 != node2
+            return false
+        end
+    end
+    return true
+end
 
-#         #Setup subproblem graphs
-#         subproblem_graph = OptiGraph()
-#         subproblem_graph.modelnodes = overlap_nodes
-#         subproblem_graph.linkedges = overlap_edges
+function _is_objective_separable( 
+    func::Plasmo.GenericNonlinearExpr{NodeVariableRef}
+)
+    # check for a constant multiplier
+    if func.head == :*
+        if !(func.args[1] isa Number)
+            return false
+        end
+    end
 
-#         push!(subproblem_graphs, subproblem_graph)
-#         push!(boundary_linkedges_list, boundary_edges)
-#     end
+    # if not additive, check if term is separable
+    if func.head != :+ && func.head != :-
+        vars = Plasmo._extract_variables(func)
+        nodes = get_node.(vars)
+        if length(unique(nodes)) > 1
+            return false
+        end
+    end
 
-#     return subproblem_graphs, boundary_linkedges_list
-# end
+    # check each argument
+    for arg in func.args
+        if !(_is_objective_separable(arg))
+            return false
+        end
+    end
+    return true
+end
+
+# NOTE: objective must be separable
+function set_node_objectives_from_graph(graph::OptiGraph)
+    obj = objective_function(graph)
+    if !(_is_objective_separable(obj))
+        error("Cannot set node objectives from graph. It is not separable across nodes.")
+    end
+    sense = objective_sense(graph)
+    _set_node_objectives_from_graph(obj, sense)
+    return nothing
+end
+
+function _set_node_objectives_from_graph(
+    func::Plasmo.NodeVariableRef, 
+    sense::MOI.OptimizationSense
+)
+    node = get_node(func)
+    set_objective_function(node, func)
+    set_objective_sense(node, sense)
+    return nothing
+end
+
+function _set_node_objectives_from_graph(
+    func::Plasmo.GenericAffExpr{<:Number,NodeVariableRef}, 
+    sense::MOI.OptimizationSense
+)
+    # collect terms for each node
+
+    
+    node = get_node(func)
+    set_objective_function(node, func)
+    set_objective_sense(node, sense)
+    return nothing
+end
+
+# TODO Utilites
+
+# check that overlap is at least 1
+function _check_overlap()
+end
+
+# check whether partitions are contiguous
+function _check_contiguous_partitions()
+end
+
+# modify non_contiguous partitions to make them contiguous
+function _fix_non_contiguous_partitions()
+end
+
+function _check_hierarchical()
+end
+

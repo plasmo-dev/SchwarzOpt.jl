@@ -13,6 +13,7 @@ end
     tolerance::Float64=1e-4     # primal and dual tolerance measure
     max_iterations::Int64=1000  # maximum number of iterations
     mu::Float64=1.20            # augmented lagrangian penalty
+    use_node_objectives::Bool=true
 end
 
 mutable struct Optimizer{GT<:Plasmo.AbstractOptiGraph} <: MOI.AbstractOptimizer
@@ -24,9 +25,9 @@ mutable struct Optimizer{GT<:Plasmo.AbstractOptiGraph} <: MOI.AbstractOptimizer
     options::Options
 
     # mapping information
-    node_subgraph_map::OrderedDict{OptiNode, GT}
-    edge_subgraph_map::OrderedDict{OptiEdge, GT}
-    expanded_subgraph_map::OrderedDict{GT, GT}
+    node_subgraph_map::OrderedDict{OptiNode,GT}
+    edge_subgraph_map::OrderedDict{OptiEdge,GT}
+    expanded_subgraph_map::OrderedDict{GT,GT}
     incident_variable_map::OrderedDict{Plasmo.NodeVariableRef, Int}
     incident_constraint_map::OrderedDict{Plasmo.EdgeConstraintRef, Int}
 
@@ -38,6 +39,7 @@ mutable struct Optimizer{GT<:Plasmo.AbstractOptiGraph} <: MOI.AbstractOptimizer
     objective_value::Union{Nothing, Float64}
 
     # current primal and dual values
+    # TODO: communicated values can be stored on subproblems
     x_vals::Vector{Float64}
     l_vals::Vector{Float64}
 
@@ -124,7 +126,7 @@ function Optimizer(
     return optimizer
 end
 
-function _check_valid_subproblems(optimizer::Optimizer)
+function _check_valid_problem(optimizer::Optimizer)
     graph = optimizer.graph
     subgraphs = optimizer.subproblem_graphs
     subgraph_nodes = union(all_nodes.(subgraphs)...)
@@ -133,18 +135,23 @@ function _check_valid_subproblems(optimizer::Optimizer)
     length(subgraph_nodes) == num_nodes(graph) || 
         error(
         """
-        Invalid subgraph problems given to optimizer. The number of nodes in 
-        subgraphs does not match the number of nodes in the optigraph.
+            Invalid subgraph problems given to optimizer. The number of nodes in 
+            subgraphs does not match the number of nodes in the optigraph.
         """
         )
 
     all((node) -> node in all_nodes(graph), subgraph_nodes) ||
         error(
             """
-            Invalid subgraphs given to optimizer.  At least one provided subgraph
-            constrains an optinode that is not in the optigraph.
+                Invalid subgraphs given to optimizer.  At least one provided subgraph
+                constrains an optinode that is not in the optigraph.
             """
         )
+
+    # TODO: check if objective is separable
+        
+
+    # TODO: check if graph is hierarchical. come up with way to handle 'parent' nodes
 
     # TODO: check for an overlap of at least 1.
     # _check_overlap
@@ -155,6 +162,10 @@ function _check_valid_subproblems(optimizer::Optimizer)
     return true
 end
 
+function _is_objective_separable(optimizer::Optimizer)
+    return _is_objective_separable(objective_function(optimizer.graph))
+end
+
 function initialize!(optimizer::Optimizer)
     if optimizer.subproblem_optimizer == nothing
         error(
@@ -163,7 +174,8 @@ function initialize!(optimizer::Optimizer)
     end
 
     return optimizer.timers.initialize_time = @elapsed begin
-        _check_valid_subproblems(optimizer)
+
+        _check_valid_problem(optimizer)
         
         graph = optimizer.graph
         n_subproblems = length(optimizer.subproblem_graphs)
@@ -306,11 +318,21 @@ function initialize!(optimizer::Optimizer)
     end
 end
 
-function _begin_iterations(optimizer::Optimizer)
+function _create_subproblem_objectives(optimizer::Optimizer)
+    if optimizer.options.use_node_objectives
+        for subproblem_graph in optimizer.subproblem_graphs
+            set_to_node_objectives(subproblem_graph)
+        end
+    else
+        # parse separable graph graph objective onto nodes
+    end
+end
+
+function reset_iterations(optimizer::Optimizer)
     optimizer.timers = Timers()
     optimizer.timers.start_time = time()
 
-    # initialize subproblems
+    # initialize subproblem optimizers
     for subgraph in optimizer.subproblem_graphs
         JuMP.set_optimizer(subgraph, optimizer.subproblem_optimizer)
     end
@@ -318,10 +340,14 @@ function _begin_iterations(optimizer::Optimizer)
     optimizer.err_pr = Inf
     optimizer.err_du = Inf
     optimizer.iteration = 0
-
     return nothing
 end
 
+"""
+    do_iteration(optimizer::Optimizer)
+
+Perform a single iteration of the optimizer.
+"""
 function do_iteration(optimizer::Optimizer)
     # do iteration for each subproblem
     optimizer.timers.update_subproblem_time += @elapsed begin
@@ -335,7 +361,8 @@ function do_iteration(optimizer::Optimizer)
             # returns primal and dual information to communicate to other subproblems
             xk, lk = _solve_subproblem(subproblem_graph)
 
-            #Updates primal and dual information for other subproblems.
+            # update optimizer primal and dual values to send to subproblems
+            # TODO: communicate values instead to subproblems
             for (idx, x_val) in xk
                 optimizer.x_vals[idx] = x_val
             end
@@ -347,12 +374,13 @@ function do_iteration(optimizer::Optimizer)
     return nothing
 end
 
-
+# TODO: set objective function on subproblems
 function _update_subproblem(optimizer::Optimizer, subproblem_graph::OptiGraph)
-    set_objective_function(subproblem_graph, subproblem_graph.ext[:original_objective])
-    for link in subproblem_graph.ext[:incident_links]
-        _formulate_penalty!(optimizer, subproblem_graph, link)
-    end
+    # set_to_node_objectives(subproblem_graph)
+    # set_objective_function(subproblem_graph, subproblem_graph.ext[:overlap_objective])
+    # for link in subproblem_graph.ext[:incident_links]
+    #     _formulate_penalty!(optimizer, subproblem_graph, link)
+    # end
     return nothing
 end
 
@@ -449,18 +477,9 @@ function _calculate_objective_value(optimizer::Optimizer)
     optimizer.objective_value = objective_value
 
     return nothing
-    # # TODO: evaluate the total objective function using subgraph solutions
-    # # should be same approach as calculating feasibility.
-    # return sum(
-    #     value(objective_function(subgraph)) for subgraph in local_subgraphs(optimizer.graph)
-    # )
-    # # return sum(
-    # #     value(optimizer.subproblem_graphs[i].ext[:restricted_objective]) for
-    # #     i in 1:length(optimizer.subproblem_graphs)
-    # # )
 end
 
-#TODO: cache vap_map ahead of time.  This may be bottlenecking.
+#TODO: cache var_map ahead of time.  This may be bottlenecking.
 """
     _calculate_primal_feasibility(optimizer::Optimizer)
 
@@ -495,7 +514,8 @@ function _calculate_primal_feasibility(optimizer::Optimizer)
     return primal_residual
 end
 
-#NOTE: Need at least an overlap of one for this to work
+# NOTE: Need at least an overlap of one to calculate the dual.
+# the pure gauss-seidel approach would require fixing the neighbor variables.
 function _calculate_dual_feasibility(optimizer::Optimizer)
     graph = optimizer.graph
     link_constraint_refs = local_link_constraints(optimizer.graph)
@@ -505,12 +525,13 @@ function _calculate_dual_feasibility(optimizer::Optimizer)
         link_ref = link_constraint_refs[i]
         edge = Plasmo.owner_model(link_ref)
 
-        graphs = Set{typeof(optimizer.graph)}()
+        graphs = Vector{typeof(optimizer.graph)}()
         for node in all_nodes(edge)
             graph = optimizer.node_subgraph_map[node]
             subproblem_graph = optimizer.expanded_subgraph_map[graph]
             push!(graphs, subproblem_graph)
         end
+        graphs = unique(graphs)
 
         # check each subproblem's dual value for this linkconstraint
         duals = zeros(length(graphs))
@@ -525,7 +546,7 @@ function _calculate_dual_feasibility(optimizer::Optimizer)
     return dual_residual
 end
 
-function _eval_and_save_iteration(optimizer::Optimizer)
+function eval_and_save_iteration(optimizer::Optimizer)
     # evaluate residuals
     optimizer.timers.eval_primal_feasibility_time += @elapsed prf = _calculate_primal_feasibility(
         optimizer
@@ -558,17 +579,17 @@ function run_algorithm!(optimizer::Optimizer)
     println("Optimizing with SchwarzOpt v0.2.0 using $(Threads.nthreads()) threads")
     println("###########################################################")
     println()
-    println("Number of variables: $(num_all_variables(optimizer.graph))")
+    println("Number of variables: $(num_variables(optimizer.graph))")
     println(
-        "Number of constraints: $(num_all_constraints(optimizer.graph) + num_all_linkconstraints(optimizer.graph))",
+        "Number of constraints: $(num_constraints(optimizer.graph))",
     )
     println("Number of subproblems: $(length(optimizer.subproblem_graphs))")
     println("Overlap: ")
-    println("Subproblem variables:   $(num_all_variables.(optimizer.subproblem_graphs))")
-    println("Subproblem constraints: $(num_all_constraints.(optimizer.subproblem_graphs))")
+    println("Subproblem variables:   $(num_variables.(optimizer.subproblem_graphs))")
+    println("Subproblem constraints: $(num_constraints.(optimizer.subproblem_graphs))")
     println()
 
-    _begin_iterations(optimizer)
+    reset_iterations(optimizer)
 
     while optimizer.err_pr > optimizer.tolerance || optimizer.err_du > optimizer.tolerance
         optimizer.iteration += 1
@@ -579,7 +600,7 @@ function run_algorithm!(optimizer::Optimizer)
 
         do_iteration(optimizer)
 
-        _eval_and_save_iteration(optimizer)
+        eval_and_save_iteration(optimizer)
 
         # print iteration
         if optimizer.iteration % 20 == 0 || optimizer.iteration == 1
@@ -605,7 +626,7 @@ function run_algorithm!(optimizer::Optimizer)
         end
     end
 
-    # TODO: expose algorithm solution with value and dual.
+    # TODO: expose algorithm solution using value and dual.
 
     optimizer.timers.total_time = time() - optimizer.timers.start_time
     if optimizer.status != MOI.ITERATION_LIMIT
