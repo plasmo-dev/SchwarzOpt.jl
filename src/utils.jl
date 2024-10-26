@@ -35,14 +35,6 @@ function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEd
     return subgraph_boundary_constraints
 end
 
-function _find_subproblem(optimizer::Optimizer, node::OptiNode)
-    for subproblem in optimizer.subproblem_graphs
-        if node in subproblem.nodes
-            return subproblem
-        end
-    end
-    return error("Node does not belong to any subproblem")
-end
 
 function _is_objective_separable(::Number)
     return true
@@ -141,7 +133,7 @@ function _set_node_objectives_from_graph(
     return nothing
 end
 
-# TODO Utilites
+# TODO Utilites (in Plasmo.jl)
 
 # check that overlap is at least 1
 function _check_overlap() end
@@ -150,6 +142,7 @@ function _check_overlap() end
 function _check_contiguous_partitions() end
 
 # modify non_contiguous partitions to make them contiguous
+# Plasmo utility
 function _fix_non_contiguous_partitions() end
 
 function _check_hierarchical() end
