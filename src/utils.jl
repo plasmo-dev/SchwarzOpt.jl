@@ -6,10 +6,8 @@
 
     Find the boundary edges given a hypergraph projection and vector of subgraphs.
 """
-function _find_boundary_edges(
-    projection::Plasmo.HyperGraphProjection, 
-    subgraphs::Vector{OptiGraph}
-)
+function _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph})
+    projection = hyper_projection(graph)
     boundary_edge_list = Vector{Vector{OptiEdge}}()
     for subgraph in subgraphs
         subgraph_nodes = all_nodes(subgraph)
@@ -37,6 +35,15 @@ function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEd
     return subgraph_boundary_constraints
 end
 
+function _find_subproblem(optimizer::Optimizer, node::OptiNode)
+    for subproblem in optimizer.subproblem_graphs
+        if node in subproblem.nodes
+            return subproblem
+        end
+    end
+    return error("Node does not belong to any subproblem")
+end
+
 function _is_objective_separable(::Number)
     return true
 end
@@ -49,15 +56,13 @@ function _is_objective_separable(::Plasmo.GenericAffExpr{<:Number,NodeVariableRe
     return true
 end
 
-function _is_objective_separable(
-    func::Plasmo.GenericQuadExpr{<:Number,NodeVariableRef},
-)
+function _is_objective_separable(func::Plasmo.GenericQuadExpr{<:Number,NodeVariableRef})
     # check each term; make sure they are all on the same subproblem
     for term in Plasmo.quad_terms(func)
         # term = (coefficient, variable_1, variable_2)
         node1 = get_node(term[2])
         node2 = get_node(term[3])
-        
+
         # if any term is split across nodes, the objective is not separable
         if node1 != node2
             return false
@@ -66,9 +71,7 @@ function _is_objective_separable(
     return true
 end
 
-function _is_objective_separable( 
-    func::Plasmo.GenericNonlinearExpr{NodeVariableRef}
-)
+function _is_objective_separable(func::Plasmo.GenericNonlinearExpr{NodeVariableRef})
     # check for a constant multiplier
     if func.head == :*
         if !(func.args[1] isa Number)
@@ -106,8 +109,7 @@ function set_node_objectives_from_graph(graph::OptiGraph)
 end
 
 function _set_node_objectives_from_graph(
-    func::Plasmo.NodeVariableRef, 
-    sense::MOI.OptimizationSense
+    func::Plasmo.NodeVariableRef, sense::MOI.OptimizationSense
 )
     node = get_node(func)
     set_objective_function(node, func)
@@ -116,32 +118,38 @@ function _set_node_objectives_from_graph(
 end
 
 function _set_node_objectives_from_graph(
-    func::Plasmo.GenericAffExpr{<:Number,NodeVariableRef}, 
-    sense::MOI.OptimizationSense
+    func::Plasmo.GenericAffExpr{<:Number,NodeVariableRef}, sense::MOI.OptimizationSense
 )
     # collect terms for each node
+    node_terms = Dict{OptiNode,Vector{Tuple{Float64,Plasmo.NodeVariableRef}}}()
+    nodes = Plasmo.collect_nodes(func)
+    for node in nodes
+        node_terms[node] = Vector{Tuple{Float64,Plasmo.NodeVariableRef}}()
+    end
 
-    
-    node = get_node(func)
-    set_objective_function(node, func)
-    set_objective_sense(node, sense)
+    for term in Plasmo.linear_terms(func)
+        node = get_node(term[2])
+        push!(node_terms[node], term)
+    end
+
+    # build up expression on each node
+    for (node, terms) in node_terms
+        set_objective_sense(node, sense)
+        set_objective_function(node, coefficient * term[2])
+    end
+
     return nothing
 end
 
 # TODO Utilites
 
 # check that overlap is at least 1
-function _check_overlap()
-end
+function _check_overlap() end
 
 # check whether partitions are contiguous
-function _check_contiguous_partitions()
-end
+function _check_contiguous_partitions() end
 
 # modify non_contiguous partitions to make them contiguous
-function _fix_non_contiguous_partitions()
-end
+function _fix_non_contiguous_partitions() end
 
-function _check_hierarchical()
-end
-
+function _check_hierarchical() end
