@@ -23,7 +23,7 @@ end
     Collect the constraints associated with subgraph boundary edges. Return a vector
     of constraints for each subgraph.
 """
-function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
     subgraph_boundary_constraints = Vector{Vector{ConstraintRef}}()
     for edge_vector in subgraph_boundary_edges
         edge_constraints = Vector{ConstraintRef}()
@@ -34,7 +34,6 @@ function _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEd
     end
     return subgraph_boundary_constraints
 end
-
 
 function _is_objective_separable(::Number)
     return true
@@ -133,7 +132,7 @@ function _set_node_objectives_from_graph(
     return nothing
 end
 
-# TODO Utilites (in Plasmo.jl)
+# TODO Utilites we could add in Plasmo.jl
 
 # check that overlap is at least 1
 function _check_overlap() end

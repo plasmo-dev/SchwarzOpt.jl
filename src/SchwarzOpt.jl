@@ -10,8 +10,8 @@ using MathOptInterface, Plasmo, JuMP
 
 include("utils.jl")
 
-include("optimizer.jl")
+include("algorithm.jl")
 
-include("interface.jl")
+include("plasmo_interface.jl")
 
 end

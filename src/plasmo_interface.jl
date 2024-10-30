@@ -9,16 +9,20 @@ function Base.string(algorithm::Algorithm)
         %30s %9s
         %30s %9s
         """,
-        "Number of subproblems:",length(algorithm.expanded_subgraphs),
-        "Number of variables:", Plasmo.num_variables(algorithm.graph),
-        "Number of constraints:", Plasmo.num_constraints(algorithm.graph),
-        "Number of linking constraints:", Plasmo.num_local_link_constraints(algorithm.graph)
+        "Number of subproblems:",
+        length(algorithm.expanded_subgraphs),
+        "Number of variables:",
+        Plasmo.num_variables(algorithm.graph),
+        "Number of constraints:",
+        Plasmo.num_constraints(algorithm.graph),
+        "Number of linking constraints:",
+        Plasmo.num_local_link_constraints(algorithm.graph)
     )
 end
 Base.print(io::IO, algorithm::Algorithm) = Base.print(io, Base.string(algorithm))
 Base.show(io::IO, algorithm::Algorithm) = Base.print(io, algorithm)
 
-# JuMP.jl/Plasmo.jl methods
+# JuMP.jl/Plasmo.jl methods for algorithm
 
 function Plasmo.value(algorithm::Algorithm, nvref::NodeVariableRef)
     node = get_node(nvref)
@@ -43,4 +47,3 @@ end
 function Plasmo.solve_time(algorithm::Algorithm)
     return algorithm.solve_time
 end
-
