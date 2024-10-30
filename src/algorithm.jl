@@ -76,7 +76,7 @@ mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     # timers
     timers::Timers
 
-    # Inner constructor
+    # inner constructor
     function Algorithm(graph::GT, options::Options) where {GT<:Plasmo.AbstractOptiGraph}
         overlapping_graphs = Vector{GT}()
         return new{GT}(
@@ -98,7 +98,7 @@ mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     end
 end
 
-# Constructors
+# constructors
 
 ## provide subproblem graphs directly
 function Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)
@@ -108,7 +108,7 @@ function Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwar
     return algorithm
 end
 
-## TODO partition using default Metis implementation
+## TODO provide partition using default Metis implementation
 function Algorithm(
     graph::OptiGraph; n_partitions=2, subproblem_algorithm=nothing, kwargs...
 )
@@ -169,13 +169,12 @@ function is_objective_separable(algorithm::Algorithm)
     return _is_objective_separable(objective_function(algorithm.graph))
 end
 
-# """
-#     Parse what the node objectives would be from the graph objective if it is seperable
-# """
-# function _parse_node_objectives(algorithm::Algorithm)
-# end
-
 function initialize!(algorithm::Algorithm)
+    if algorithm.initialized
+        error("Algorithm already initialized. Create a new instance of 
+        `Algorithm` if you want to restart the algorithm completely.")
+    end
+
     return algorithm.timers.initialize_time = @elapsed begin
         check_valid_problem(algorithm)
 
@@ -315,29 +314,27 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     end
 
     # start with subproblem objective
-    obj = Plasmo.objective_function(expanded_subgraph)
+    subproblem_objective = Plasmo.objective_function(expanded_subgraph)
+
     # add penalty for each incident linking constraint
     for link_reference in keys(subproblem_data.incident_constraint_map)
         link_constraint = Plasmo.constraint_object(link_reference)
         link_func = Plasmo.jump_function(link_constraint)
         link_rhs = Plasmo.moi_set(link_constraint).value
 
-        # generate penalty term by swapping current incident values
+        # generate penalty term by swapping incident terms with their values
         penalty_term = Plasmo.value(swap_variable_func, link_func) - link_rhs
-
-        # augmented penalty term
         augmented_penalty_term = penalty_term^2
 
-        # the current dual multiplier for this constraint
-        link_dual_value = subproblem_data.dual_values[link_reference]
-
-        # create a parameter for the dual value that we can update
+        # create a parameter on a new node for the dual value that we can update
         dual_node = add_node(expanded_subgraph)
-        @variable(dual_node, link_dual in MOI.Parameter(link_dual_value))
-        subproblem_data.dual_variables[link_reference] = link_dual
+        link_dual_value = subproblem_data.dual_values[link_reference]
+        @variable(dual_node, link_dual_parameter in MOI.Parameter(link_dual_value))
+        subproblem_data.dual_variables[link_reference] = link_dual_parameter
 
-        obj += *(-1, link_dual * penalty_term)
-        obj += *(0.5 * mu, augmented_penalty_term)
+        # update objective with dual term and augmented penalty
+        subproblem_objective += *(-1, link_dual * penalty_term)
+        subproblem_objective += *(0.5 * mu, augmented_penalty_term)
 
         # NOTE: add_to_expression does not work on the nonlinear terms
         #Plasmo.add_to_expression!(obj, -1, link_dual*penalty_term)
@@ -388,7 +385,7 @@ function do_iteration(algorithm::Algorithm)
     # communicate primal and dual values
     algorithm.timers.communicate_time += @elapsed begin
         for subproblem_graph in algorithm.subproblem_graphs
-            _communicate_values(subproblem_graph)
+            _retrieve_neighbor_values(subproblem_graph)
         end
     end
 
@@ -414,7 +411,18 @@ function _solve_subproblem(subproblem_graph::OptiGraph)
     return nothing
 end
 
-function _communicate_values(subproblem_graph::OptiGraph) end
+function _retrieve_neighbor_values(subproblem_graph::OptiGraph)
+    subproblem_data = subproblem_graph.ext[:subproblem_data]
+    for (variable, remote_graph) in subproblem_data.incident_variable_map
+        subproblem_data.primal_values[variable] = Plasmo.value(remote_graph, variable)
+    end
+    for (link_reference, remote_graph) in subproblem_data.incident_constraint_map
+        subproblem_data.dual_values[link_reference] = Plasmo.dual(
+            remote_graph, link_reference
+        )
+    end
+    return nothing
+end
 
 function _update_suproblem(subproblem_graph::OptiGraph)
     _update_objective_penalty(subproblem_graph)
@@ -423,6 +431,11 @@ end
 
 # check iteration values
 
+"""
+    calculate_objective_value(algorithm::Algorithm)
+
+Evaluate the objective value defined over the algorithm's graph.
+"""
 function calculate_objective_value(algorithm::Algorithm)
     func = Plasmo.objective_function(algorithm.graph)
 
@@ -442,12 +455,11 @@ function calculate_objective_value(algorithm::Algorithm)
     return nothing
 end
 
-#TODO: cache var_map ahead of time.  This may be bottlenecking.
 """
-    _calculate_primal_feasibility(algorithm::Algorithm)
+    calculate_primal_feasibility(algorithm::Algorithm)
 
-    Evaluate the primal feasibility of the linking constraints defined over the 
-    algorithm's graph.
+Evaluate the primal feasibility of the linking constraints defined over the 
+algorithm's graph.
 """
 function calculate_primal_feasibility(algorithm::Algorithm)
     link_constraint_refs = local_link_constraints(algorithm.graph)
@@ -478,6 +490,12 @@ end
 
 # NOTE: Need at least an overlap of one to calculate the dual.
 ## the pure gauss-seidel approach would require fixing the neighbor variables.
+"""
+    calculate_dual_feasibility(algorithm::Algorithm)
+
+Evaluate the dual feasibility of the linking constraints defined over the 
+algorithm's graph.
+"""
 function calculate_dual_feasibility(algorithm::Algorithm)
     graph = algorithm.graph
     link_constraint_refs = local_link_constraints(algorithm.graph)
@@ -510,17 +528,17 @@ end
 
 function eval_iteration(algorithm::Algorithm; save_iteration=true)
     # evaluate residuals
-    algorithm.timers.eval_primal_feasibility_time += @elapsed prf = _calculate_primal_feasibility(
+    algorithm.timers.eval_primal_feasibility_time += @elapsed prf = calculate_primal_feasibility(
         algorithm
     )
-    algorithm.timers.eval_dual_feasibility_time += @elapsed duf = _calculate_dual_feasibility(
+    algorithm.timers.eval_dual_feasibility_time += @elapsed duf = calculate_dual_feasibility(
         algorithm
     )
     algorithm.err_pr = norm(prf[:], Inf)
     algorithm.err_du = norm(duf[:], Inf)
 
     # eval objective
-    algorithm.timers.eval_objective_time += @elapsed algorithm.objective_value = _calculate_objective_value(
+    algorithm.timers.eval_objective_time += @elapsed algorithm.objective_value = calculate_objective_value(
         algorithm
     )
 
