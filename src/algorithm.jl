@@ -4,6 +4,7 @@
     eval_objective_time::Float64 = 0.0
     eval_primal_feasibility_time::Float64 = 0.0
     eval_dual_feasibility_time::Float64 = 0.0
+    communicate_time::Float64 = 0.0
     update_subproblem_time::Float64 = 0.0
     solve_subproblem_time::Float64 = 0.0
     total_time::Float64 = 0.0
@@ -28,10 +29,14 @@ mutable struct SubProblemData{GT<:Plasmo.AbstractOptiGraph}
     primal_values::OrderedDict{NodeVariableRef,Float64}
     dual_values::OrderedDict{EdgeConstraintRef,Float64}
 
-    # the dual variables parameters (used for updating the objective)
-    dual_variables::OrderedDict{EdgeConstraintRef,NodeVariableRef}
+    # primal and dual parameters (used for updating the objective)
+    primal_parameters::OrderedDict{NodeVariableRef,NodeVariableRef}
+    dual_parameters::OrderedDict{EdgeConstraintRef,NodeVariableRef}
 
-    # the current objective function (with penalties)
+    # node objectives on subproblem
+    node_objectives::OrderedDict{OptiNode,Plasmo.AbstractJuMPScalar}
+
+    # the current total objective function (with penalties)
     objective_function::Union{Nothing,Plasmo.AbstractJuMPScalar}
 end
 
@@ -40,21 +45,26 @@ function SubProblemData(restricted_subgraph::GT) where {GT<:Plasmo.AbstractOptiG
     incident_constraint_map = OrderedDict{EdgeConstraintRef,GT}()
     primal_values = OrderedDict{NodeVariableRef,Float64}()
     dual_values = OrderedDict{EdgeConstraintRef,Float64}()
-    dual_variables = OrderedDict{EdgeConstraintRef,NodeVariableRef}()
+    primal_parameters = OrderedDict{NodeVariableRef,NodeVariableRef}()
+    dual_parameters = OrderedDict{EdgeConstraintRef,NodeVariableRef}()
+    node_objectives = OrderedDict{OptiNode,Plasmo.AbstractJuMPScalar}()
     return SubProblemData(
         restricted_subgraph,
         incident_variable_map,
         incident_constraint_map,
         primal_values,
         dual_values,
-        dual_variables,
+        primal_parameters,
+        dual_parameters,
+        node_objectives,
         nothing,
     )
 end
 
 mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     graph::GT
-    expanded_subgraphs::Vector{GT}  # subproblem graphs
+    expanded_subgraphs::Vector{GT}  # i.e. subproblem graphs
+    objective_func::Plasmo.AbstractJuMPScalar
 
     # algorithm options
     options::Options
@@ -79,9 +89,15 @@ mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     # inner constructor
     function Algorithm(graph::GT, options::Options) where {GT<:Plasmo.AbstractOptiGraph}
         overlapping_graphs = Vector{GT}()
+        if options.use_node_objectives
+            objective_func = sum(objective_function(node) for node in all_nodes(graph))
+        else
+            objective_func = Plasmo.objective_function(graph)
+        end
         return new{GT}(
             graph,
             overlapping_graphs,
+            objective_func,
             options,
             false,
             MOI.OPTIMIZE_NOT_CALLED,
@@ -216,12 +232,14 @@ function initialize!(algorithm::Algorithm)
         @assert length(all_incident_constraints) == n_subproblems
 
         # setup data structure for each subproblem
-        for i in 1:n_subproblems
+        for i = 1:n_subproblems
             restricted_subgraph = original_subgraphs[i]
             expanded_subgraph = algorithm.expanded_subgraphs[i]
             subproblem_incident_edges = all_incident_edges[i]
             subproblem_data = SubProblemData(restricted_subgraph)
             expanded_subgraph.ext[:subproblem_data] = subproblem_data
+
+            parameter_node = add_node(expanded_subgraph)
 
             for linking_edge in subproblem_incident_edges
                 linked_variables = all_variables(linking_edge)
@@ -240,6 +258,8 @@ function initialize!(algorithm::Algorithm)
                     else
                         primal_start = Plasmo.start_value(incident_variable)
                     end
+                    @variable(parameter_node, p in MOI.Parameter(primal_start))
+                    subproblem_data.primal_parameters[incident_variable] = p
                     subproblem_data.primal_values[incident_variable] = primal_start
                 end
 
@@ -254,6 +274,8 @@ function initialize!(algorithm::Algorithm)
                     else
                         dual_start = Plasmo.start_value(link_constraint)
                     end
+                    @variable(parameter_node, d in MOI.Parameter(dual_start))
+                    subproblem_data.dual_parameters[link_constraint] = d
                     subproblem_data.dual_values[link_constraint] = dual_start
                 end
             end
@@ -267,11 +289,13 @@ function initialize!(algorithm::Algorithm)
     end
 end
 
+# TODO: extract node objectives from graph objective
 function _extract_node_objectives(algorithm::Algorithm)
     sense = Plasmo.objective_sense(algorithm.graph)
     for expanded_subgraph in algorithm.expanded_subgraphs
-        node_objectives = _extract_node_objectives(objective_func, expanded_subgraph)
-        for node in all_nodes(expanded_subgraph)
+        restricted_subgraph = expanded_subgraph.ext[:subproblem_data].restricted_subgraph
+        node_objectives = _extract_node_objectives(objective_func, restricted_subgraph)
+        for node in all_nodes(restricted_subgraph)
             set_objective_function(node, node_objectives[node])
             set_objective_sense(node, sense)
         end
@@ -298,7 +322,11 @@ end
         mu::Float64
     )
 
-    Formulate penalty term for each subproblem
+Formulate and add objective penalty term for the given subproblem.
+
+Args:
+    `expanded_subgraph`: The optimizer subproblem that contains overlap.
+    `mu`: A hyperparameter for the augmented lagrangian penalty.
 """
 function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     subproblem_data = expanded_subgraph.ext[:subproblem_data]
@@ -307,7 +335,8 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     incident_variables = keys(subproblem_data.incident_variable_map)
     function swap_variable_func(nvref::Plasmo.NodeVariableRef)
         if nvref in incident_variables
-            return subproblem_data.primal_values[nvref]
+            #return subproblem_data.primal_values[nvref]
+            return subproblem_data.primal_parameters[nvref]
         else
             return nvref
         end
@@ -327,28 +356,36 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
         augmented_penalty_term = penalty_term^2
 
         # create a parameter on a new node for the dual value that we can update
-        dual_node = add_node(expanded_subgraph)
-        link_dual_value = subproblem_data.dual_values[link_reference]
-        @variable(dual_node, link_dual_parameter in MOI.Parameter(link_dual_value))
-        subproblem_data.dual_variables[link_reference] = link_dual_parameter
+        # dual_node = add_node(expanded_subgraph)
+        #link_dual_value = subproblem_data.dual_values[link_reference]
+        #@variable(dual_node, link_dual_parameter in MOI.Parameter(link_dual_value))
+        #subproblem_data.dual_variables[link_reference] = link_dual_parameter
 
+        link_dual_parameter = subproblem_data.dual_parameters[link_reference]
         # update objective with dual term and augmented penalty
-        subproblem_objective += *(-1, link_dual * penalty_term)
+        subproblem_objective += *(-1, link_dual_parameter * penalty_term)
         subproblem_objective += *(0.5 * mu, augmented_penalty_term)
 
         # NOTE: add_to_expression does not work on the nonlinear terms
         #Plasmo.add_to_expression!(obj, -1, link_dual*penalty_term)
         #Plasmo.add_to_expression!(obj, 0.5*mu, augmented_penalty_term)
     end
-    set_objective_function(expanded_subgraph, obj)
+    set_objective_function(expanded_subgraph, subproblem_objective)
     return nothing
 end
 
 function _update_objective_penalty(expanded_subgraph::OptiGraph)
     subproblem_data = expanded_subgraph.ext[:subproblem_data]
+    for variable in keys(subproblem_data.incident_variable_map)
+        variable_primal_value = subproblem_data.primal_values[variable]
+        variable_parameter = subproblem_data.primal_parameters[variable]
+        Plasmo.set_parameter_value(variable_parameter, variable_primal_value)
+    end
+
     for link_reference in keys(subproblem_data.incident_constraint_map)
         link_dual_value = subproblem_data.dual_values[link_reference]
-        link_dual_parameter = subproblem_data.dual_variables[link_reference]
+        link_dual_parameter = subproblem_data.dual_parameters[link_reference]
+        Plasmo.set_parameter_value(link_dual_parameter, link_dual_value)
     end
     return nothing
 end
@@ -377,20 +414,20 @@ end
 function do_iteration(algorithm::Algorithm)
     # update based on current information
     algorithm.timers.solve_subproblem_time += @elapsed begin
-        Threads.@threads for subproblem_graph in algorithm.subproblem_graphs
+        Threads.@threads for subproblem_graph in algorithm.expanded_subgraphs
             _solve_subproblem(subproblem_graph)
         end
     end
 
     # communicate primal and dual values
     algorithm.timers.communicate_time += @elapsed begin
-        for subproblem_graph in algorithm.subproblem_graphs
+        for subproblem_graph in algorithm.expanded_subgraphs
             _retrieve_neighbor_values(subproblem_graph)
         end
     end
 
     algorithm.timers.update_subproblem_time += @elapsed begin
-        for subproblem_graph in algorithm.subproblem_graphs
+        for subproblem_graph in algorithm.expanded_subgraphs
             _update_suproblem(subproblem_graph)
         end
     end
@@ -437,22 +474,19 @@ end
 Evaluate the objective value defined over the algorithm's graph.
 """
 function calculate_objective_value(algorithm::Algorithm)
-    func = Plasmo.objective_function(algorithm.graph)
-
     # grab variable values from corresponding subproblems
-    vars = Plasmo._extract_variables(func)
+    vars = Plasmo.extract_variables(algorithm.objective_func)
     var_vals = Dict{NodeVariableRef,Float64}()
     for var in vars
         node = get_node(var)
-        # subproblem_graph = _get_subproblem(node)
-        subgraph = algorithm.node_subgraph_map[node]
-        subproblem_graph = algorithm.expanded_subgraph_map[subgraph]
+        subproblem_graph = node[:subproblem_graph]
         var_vals[var] = Plasmo.value(subproblem_graph, var)
     end
-    objective_value = Plasmo.value(i -> get(var_vals, i, 0.0), func)
-    algorithm.objective_value = objective_value
 
-    return nothing
+    # evaluate using restricted solutions
+    objective_value = Plasmo.value(i -> get(var_vals, i, 0.0), algorithm.objective_func)
+    algorithm.objective_value = objective_value
+    return objective_value
 end
 
 """
@@ -464,32 +498,31 @@ algorithm's graph.
 function calculate_primal_feasibility(algorithm::Algorithm)
     link_constraint_refs = local_link_constraints(algorithm.graph)
     n_link_constraints = length(link_constraint_refs)
-    primal_residual = zeros(n_link_constraints)
-    for i in 1:n_link_constraints
-        # get link constraint function and set
-        link_ref = link_constraint_refs[i]
-        link_constraint = Plasmo.constraint_object(link_ref)
+    primal_residuals = Vector{Float64}(undef, n_link_constraints)
+    for i = 1:n_link_constraints
+        link_reference = link_constraint_refs[i]
+        link_constraint = Plasmo.constraint_object(link_reference)
         func = Plasmo.jump_function(link_constraint)
         set = Plasmo.moi_set(link_constraint)
 
         # grab variable values from corresponding subproblems
-        vars = Plasmo._extract_variables(func)
+        vars = Plasmo.extract_variables(func)
         var_vals = Dict{NodeVariableRef,Float64}()
         for var in vars
             node = get_node(var)
-            subproblem_graph = node[:expanded_subgraph]
+            subproblem_graph = node[:subproblem_graph]
             var_vals[var] = Plasmo.value(subproblem_graph, var)
         end
 
         # evaluate linking constraint using subproblem variable values
         constraint_value = Plasmo.value(i -> get(var_vals, i, 0.0), func)
-        primal_residual[i] = constraint_value - set.value
+        primal_residuals[i] = constraint_value - set.value
     end
-    return primal_residual
+    return primal_residuals
 end
 
 # NOTE: Need at least an overlap of one to calculate the dual.
-## the pure gauss-seidel approach would require fixing the neighbor variables.
+## a pure gauss-seidel-type approach would require fixing the neighbor variables.
 """
     calculate_dual_feasibility(algorithm::Algorithm)
 
@@ -500,30 +533,26 @@ function calculate_dual_feasibility(algorithm::Algorithm)
     graph = algorithm.graph
     link_constraint_refs = local_link_constraints(algorithm.graph)
     n_link_constraints = length(link_constraint_refs)
-    dual_residual = zeros(n_link_constraints)
-    for i in 1:n_link_constraints
-        link_ref = link_constraint_refs[i]
-        edge = Plasmo.owner_model(link_ref)
+    dual_residuals = Vector{Float64}(undef, n_link_constraints)
+    for i = 1:n_link_constraints
+        link_reference = link_constraint_refs[i]
+        edge = Plasmo.get_edge(link_reference)
 
-        graphs = Vector{typeof(algorithm.graph)}()
+        # get all subproblems that contain this edge
+        graphs = Set{typeof(algorithm.graph)}()
         for node in all_nodes(edge)
-            graph = algorithm.node_subgraph_map[node]
-            subproblem_graph = algorithm.expanded_subgraph_map[graph]
+            subproblem_graph = node[:subproblem_graph]            
             push!(graphs, subproblem_graph)
         end
-        graphs = unique(graphs)
 
         # check each subproblem's dual value for this linkconstraint
-        duals = zeros(length(graphs))
-        for i in 1:length(graphs)
-            subproblem_graph = graphs[i]
-            duals[i] = dual(subproblem_graph, link_ref)
+        subproblem_duals = Vector{Float64}(undef, length(graphs))
+        for (i,graph) in enumerate(collect(graphs))
+            subproblem_duals[i] = dual(graph, link_reference)
         end
-
-        # dual residual between subproblems
-        dual_residual[i] = abs(maximum(duals) - minimum(duals))
+        dual_residuals[i] = abs(maximum(subproblem_duals) - minimum(subproblem_duals))
     end
-    return dual_residual
+    return dual_residuals
 end
 
 function eval_iteration(algorithm::Algorithm; save_iteration=true)
@@ -551,6 +580,15 @@ function eval_iteration(algorithm::Algorithm; save_iteration=true)
     return nothing
 end
 
+function _check_tolerance(algorithm::Algorithm)
+    if algorithm.err_pr > algorithm.options.tolerance
+        return true
+    elseif algorithm.err_du > algorithm.options.tolerance
+        return true
+    end
+    return false
+end
+
 function run_algorithm!(algorithm::Algorithm)
     if !algorithm.initialized
         println("Initializing Algorithm...")
@@ -563,16 +601,16 @@ function run_algorithm!(algorithm::Algorithm)
     println()
     println("Number of variables: $(num_variables(algorithm.graph))")
     println("Number of constraints: $(num_constraints(algorithm.graph))")
-    println("Number of subproblems: $(length(algorithm.subproblem_graphs))")
-    println("Subproblem variables:   $(num_variables.(algorithm.subproblem_graphs))")
-    println("Subproblem constraints: $(num_constraints.(algorithm.subproblem_graphs))")
+    println("Number of subproblems: $(length(algorithm.expanded_subgraphs))")
+    println("Subproblem variables:   $(num_variables.(algorithm.expanded_subgraphs))")
+    println("Subproblem constraints: $(num_constraints.(algorithm.expanded_subgraphs))")
     println()
 
     reset_iterations(algorithm)
 
-    while algorithm.err_pr > algorithm.tolerance || algorithm.err_du > algorithm.tolerance
+    while _check_tolerance(algorithm)
         algorithm.iteration += 1
-        if algorithm.iteration > algorithm.max_iterations
+        if algorithm.iteration > algorithm.options.max_iterations
             algorithm.status = MOI.ITERATION_LIMIT
             break
         end
@@ -595,7 +633,7 @@ function run_algorithm!(algorithm::Algorithm)
 
         # update start values
         algorithm.timers.update_subproblem_time += @elapsed begin
-            for subproblem in algorithm.subproblem_graphs
+            for subproblem in algorithm.expanded_subgraphs
                 JuMP.set_start_value.(
                     Ref(subproblem),
                     all_variables(subproblem),
@@ -605,11 +643,9 @@ function run_algorithm!(algorithm::Algorithm)
         end
     end
 
-    # TODO: expose algorithm solution using value and dual.
-
     algorithm.timers.total_time = time() - algorithm.timers.start_time
     if algorithm.status != MOI.ITERATION_LIMIT
-        algorithm.status = Plasmo.termination_status(algorithm.subproblem_graphs[1])
+        algorithm.status = Plasmo.termination_status(algorithm.expanded_subgraphs[1])
     end
 
     println()
