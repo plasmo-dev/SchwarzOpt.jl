@@ -14,6 +14,7 @@ end
     tolerance::Float64 = 1e-4         # primal and dual tolerance measure
     max_iterations::Int64 = 1000      # maximum number of iterations
     mu::Float64 = 1.0                 # augmented lagrangian penalty
+    overlap_distance::Int64 = 1
     use_node_objectives::Bool = true  # whether to ignore graph objective and use nodes
     subproblem_optimizer = nothing
 end
@@ -66,8 +67,8 @@ end
 
 mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     graph::GT
-    expanded_subgraphs::Vector{GT}  # i.e. subproblem graphs
-    objective_func::Plasmo.AbstractJuMPScalar
+    expanded_subgraphs::Vector{GT}              # i.e. subproblem graphs
+    objective_func::Plasmo.AbstractJuMPScalar   # for evaluating total objective
 
     # algorithm options
     options::Options
@@ -119,7 +120,11 @@ end
 
 # constructors
 
-## provide subproblem graphs directly
+"""
+    Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)
+
+Create an algorithm instance by providing the subproblems directly.
+"""
 function Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)
     options = Options(; kwargs...)
     algorithm = Algorithm(graph, options)
@@ -127,19 +132,31 @@ function Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwar
     return algorithm
 end
 
-## TODO provide partition using default Metis implementation
-function Algorithm(
-    graph::OptiGraph; n_partitions=2, subproblem_algorithm=nothing, kwargs...
-)
-    options = Options(kwargs...)
-    algorithm = Algorithm(graph, options)
+"""
+    Algorithm(graph::OptiGraph, partition::Plasmo.Partition; kwargs...)
+
+Create an algorithm instance by providing a valid `Plasmo.Partition`.
+"""
+function Algorithm(graph::OptiGraph, partition::Plasmo.Partition; kwargs...)
+    options = Options(; kwargs...)
+    partitioned_graph = assemble_optigraph(partition)
+    subgraphs = local_subgraphs(partitioned_graph)
+    projection = hyper_projection(graph)
+    algorithm = Algorithm(partitioned_graph, options)
+    algorithm.expanded_subgraphs = expand.(projection, subgraphs, options.overlap_distance)
     return algorithm
 end
 
-## TODO provide a Plasmo.Partition
-function Algorithm(graph::OptiGraph, partition::Plasmo.Partition; kwargs...)
-    options = Options(kwargs...)
-    algorithm = Algorithm(graph, options)
+function Algorithm(graph::OptiGraph; n_partitions=4, kwargs...)
+    options = Options(; kwargs...)
+    clique_proj = Plasmo.clique_projection(graph)
+    metis_vector = Int64.(Metis.partition(clique_proj.projected_graph, n_partitions))
+    metis_partition = Partition(clique_proj, metis_vector)
+    partitioned_graph = assemble_optigraph(metis_partition)
+    subgraphs = local_subgraphs(partitioned_graph)
+    projection = hyper_projection(graph)
+    algorithm = Algorithm(partitioned_graph, options)
+    algorithm.expanded_subgraphs = expand.(projection, subgraphs, options.overlap_distance)
     return algorithm
 end
 
@@ -168,12 +185,13 @@ function check_valid_problem(algorithm::Algorithm)
     end
 
     # TODO: check if objective is separable. need custom way to handle non-separable.
-    if !(is_objective_separable(algorithm))
+    if !(Plasmo.is_separable(objective_function(algorithm.graph)))
         algorithm.status = MOI.INVALID_MODEL
         error("Algorithm does not yet support non-separable objective functions.")
     end
 
     # TODO: check if graph is hierarchical. come up with way to handle 'parent' nodes.
+    # _check_hierarchical
 
     # TODO: raise warning for non-contiguous partitions
     # _check_partitions
@@ -182,10 +200,6 @@ function check_valid_problem(algorithm::Algorithm)
     # _check_overlap
 
     return true
-end
-
-function is_objective_separable(algorithm::Algorithm)
-    return _is_objective_separable(objective_function(algorithm.graph))
 end
 
 function initialize!(algorithm::Algorithm)
@@ -206,7 +220,7 @@ function initialize!(algorithm::Algorithm)
         # SETUP NODE TO SUBPROBLEM-GRAPH MAPPINGS
         ########################################################
         original_subgraphs = local_subgraphs(algorithm.graph)
-        for i in 1:n_subproblems
+        for i = 1:n_subproblems
             restricted_subgraph = original_subgraphs[i]
             expanded_subgraph = algorithm.expanded_subgraphs[i]
             for node in all_nodes(restricted_subgraph)
@@ -235,7 +249,7 @@ function initialize!(algorithm::Algorithm)
         @assert length(all_incident_constraints) == n_subproblems
 
         # setup data structure for each subproblem
-        for i in 1:n_subproblems
+        for i = 1:n_subproblems
             restricted_subgraph = original_subgraphs[i]
             expanded_subgraph = algorithm.expanded_subgraphs[i]
             subproblem_incident_edges = all_incident_edges[i]
@@ -293,29 +307,44 @@ function initialize!(algorithm::Algorithm)
     end
 end
 
-# TODO: extract node objectives from graph objective
-function _extract_node_objectives(algorithm::Algorithm)
-    sense = Plasmo.objective_sense(algorithm.graph)
-    for expanded_subgraph in algorithm.expanded_subgraphs
-        restricted_subgraph = expanded_subgraph.ext[:subproblem_data].restricted_subgraph
-        node_objectives = _extract_node_objectives(objective_func, restricted_subgraph)
-        for node in all_nodes(restricted_subgraph)
-            set_objective_function(node, node_objectives[node])
-            set_objective_sense(node, sense)
+function _initialize_subproblem_objectives(algorithm::Algorithm)
+    if algorithm.options.use_node_objectives
+        for expanded_subgraph in algorithm.expanded_subgraphs
+            Plasmo.set_to_node_objectives(expanded_subgraph)
+        end
+    else
+        # extract objective terms from graph if we are not using the node objectives
+        # sets [:schwarz_objective] on each optinode
+        _extract_node_objectives(algorithm)
+        
+        # set the objective on each subproblem
+        for expanded_subgraph in algorithm.expanded_subgraphs
+            set_objective_function(
+                expanded_subgraph, 
+                sum(node[:schwarz_objective] for node in all_nodes(expanded_subgraph))
+            )
+            set_objective_sense(expanded_subgraph, Plasmo.objective_sense(algorithm.graph))
         end
     end
+
+    # add objective penalties
+    for expanded_subgraph in algorithm.expanded_subgraphs
+        _formulate_objective_penalty(expanded_subgraph, algorithm.options.mu)
+    end
+    return nothing
 end
 
-function _initialize_subproblem_objectives(algorithm::Algorithm)
-    # need to extract objective terms from graph if we are not using the node objectives
-    if !(algorithm.options.use_node_objectives)
-        _extract_node_objectives(algorithm)
-    end
-
-    # set to the node objectives and add penalties
+function _extract_node_objectives(algorithm::Algorithm)
+    objective_func = Plasmo.objective_function(algorithm.graph)
     for expanded_subgraph in algorithm.expanded_subgraphs
-        set_to_node_objectives(expanded_subgraph)
-        _formulate_objective_penalty(expanded_subgraph, algorithm.options.mu)
+        restricted_subgraph = expanded_subgraph.ext[:subproblem_data].restricted_subgraph
+        node_objectives = Plasmo.extract_separable_terms(
+            objective_func, 
+            restricted_subgraph
+        )
+        for node in all_nodes(restricted_subgraph)
+            node[:schwarz_objective] = sum(node_objectives[node])
+        end
     end
     return nothing
 end
@@ -339,7 +368,6 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     incident_variables = keys(subproblem_data.incident_variable_map)
     function swap_variable_func(nvref::Plasmo.NodeVariableRef)
         if nvref in incident_variables
-            #return subproblem_data.primal_values[nvref]
             return subproblem_data.primal_parameters[nvref]
         else
             return nvref
@@ -365,26 +393,10 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
         subproblem_objective += *(0.5 * mu, augmented_penalty_term)
 
         # NOTE: add_to_expression does not work on the nonlinear terms
-        #Plasmo.add_to_expression!(obj, -1, link_dual*penalty_term)
-        #Plasmo.add_to_expression!(obj, 0.5*mu, augmented_penalty_term)
+        # Plasmo.add_to_expression!(obj, -1, link_dual*penalty_term)
+        # Plasmo.add_to_expression!(obj, 0.5*mu, augmented_penalty_term)
     end
     set_objective_function(expanded_subgraph, subproblem_objective)
-    return nothing
-end
-
-function _update_objective_penalty(expanded_subgraph::OptiGraph)
-    subproblem_data = expanded_subgraph.ext[:subproblem_data]
-    for variable in keys(subproblem_data.incident_variable_map)
-        variable_primal_value = subproblem_data.primal_values[variable]
-        variable_parameter = subproblem_data.primal_parameters[variable]
-        Plasmo.set_parameter_value(variable_parameter, variable_primal_value)
-    end
-
-    for link_reference in keys(subproblem_data.incident_constraint_map)
-        link_dual_value = subproblem_data.dual_values[link_reference]
-        link_dual_parameter = subproblem_data.dual_parameters[link_reference]
-        Plasmo.set_parameter_value(link_dual_parameter, link_dual_value)
-    end
     return nothing
 end
 
@@ -465,6 +477,22 @@ function _update_suproblem(subproblem_graph::OptiGraph)
     return nothing
 end
 
+function _update_objective_penalty(expanded_subgraph::OptiGraph)
+    subproblem_data = expanded_subgraph.ext[:subproblem_data]
+    for variable in keys(subproblem_data.incident_variable_map)
+        variable_primal_value = subproblem_data.primal_values[variable]
+        variable_parameter = subproblem_data.primal_parameters[variable]
+        Plasmo.set_parameter_value(variable_parameter, variable_primal_value)
+    end
+
+    for link_reference in keys(subproblem_data.incident_constraint_map)
+        link_dual_value = subproblem_data.dual_values[link_reference]
+        link_dual_parameter = subproblem_data.dual_parameters[link_reference]
+        Plasmo.set_parameter_value(link_dual_parameter, link_dual_value)
+    end
+    return nothing
+end
+
 """
     calculate_objective_value(algorithm::Algorithm)
 
@@ -518,13 +546,11 @@ function calculate_primal_feasibility(algorithm::Algorithm)
     return primal_residuals
 end
 
-# NOTE: Need at least an overlap of one to calculate the dual.
-## a pure gauss-seidel-type approach would require fixing the neighbor variables.
 """
     calculate_dual_feasibility(algorithm::Algorithm)
 
 Evaluate the dual feasibility of the linking constraints defined over the 
-algorithm's graph.
+algorithm's graph. NOTE: Need at least an overlap of one to calculate the dual.
 """
 function calculate_dual_feasibility(algorithm::Algorithm)
     graph = algorithm.graph
@@ -552,6 +578,12 @@ function calculate_dual_feasibility(algorithm::Algorithm)
     return dual_residuals
 end
 
+"""
+    eval_iteration(algorithm::Algorithm; save_iteration=true)
+
+Evaluate the current iterate and store values. Save the iterate values internally if 
+`save_iteration=true`.
+"""
 function eval_iteration(algorithm::Algorithm; save_iteration=true)
     # evaluate residuals
     algorithm.timers.eval_primal_feasibility_time += @elapsed prf = calculate_primal_feasibility(
