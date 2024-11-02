@@ -12,7 +12,7 @@ SchwarzOpt.jl can be installed using the following Julia Pkg command:
 
 ```julia
 using Pkg
-Pkg.add(PackageSpec(url="https://github.com/zavalab/SchwarzOpt.jl.git"))
+Pkg.add(PackageSpec(url="https://github.com/plasmo-dev/SchwarzOpt.jl.git"))
 ```
 
 ## Simple Example
