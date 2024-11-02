@@ -86,7 +86,12 @@ overlap_distance = 2        # expansion distance
 
 # create a hypergraph projection and partition with KaHyPar
 projection = Plasmo.hyper_projection(graph)
-partition_vector = KaHyPar.partition(projection, n_parts; imbalance=imbalance, configuration=:edge_cut)
+partition_vector = KaHyPar.partition(
+    projection, 
+    n_parts; 
+    imbalance=imbalance, 
+    configuration=:edge_cut
+)
 
 # create a `Plasmo.Partition` object using produced vector
 partition = Plasmo.Partition(projection, partition_vector)
