@@ -118,6 +118,8 @@ mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     end
 end
 
+Base.broadcastable(algorithm::Algorithm) = Ref(algorithm)
+
 # constructors
 
 """
@@ -220,7 +222,7 @@ function initialize!(algorithm::Algorithm)
         # SETUP NODE TO SUBPROBLEM-GRAPH MAPPINGS
         ########################################################
         original_subgraphs = local_subgraphs(algorithm.graph)
-        for i = 1:n_subproblems
+        for i in 1:n_subproblems
             restricted_subgraph = original_subgraphs[i]
             expanded_subgraph = algorithm.expanded_subgraphs[i]
             for node in all_nodes(restricted_subgraph)
@@ -249,7 +251,7 @@ function initialize!(algorithm::Algorithm)
         @assert length(all_incident_constraints) == n_subproblems
 
         # setup data structure for each subproblem
-        for i = 1:n_subproblems
+        for i in 1:n_subproblems
             restricted_subgraph = original_subgraphs[i]
             expanded_subgraph = algorithm.expanded_subgraphs[i]
             subproblem_incident_edges = all_incident_edges[i]
@@ -316,12 +318,12 @@ function _initialize_subproblem_objectives(algorithm::Algorithm)
         # extract objective terms from graph if we are not using the node objectives
         # sets [:schwarz_objective] on each optinode
         _extract_node_objectives(algorithm)
-        
+
         # set the objective on each subproblem
         for expanded_subgraph in algorithm.expanded_subgraphs
             set_objective_function(
-                expanded_subgraph, 
-                sum(node[:schwarz_objective] for node in all_nodes(expanded_subgraph))
+                expanded_subgraph,
+                sum(node[:schwarz_objective] for node in all_nodes(expanded_subgraph)),
             )
             set_objective_sense(expanded_subgraph, Plasmo.objective_sense(algorithm.graph))
         end
@@ -339,8 +341,7 @@ function _extract_node_objectives(algorithm::Algorithm)
     for expanded_subgraph in algorithm.expanded_subgraphs
         restricted_subgraph = expanded_subgraph.ext[:subproblem_data].restricted_subgraph
         node_objectives = Plasmo.extract_separable_terms(
-            objective_func, 
-            restricted_subgraph
+            objective_func, restricted_subgraph
         )
         for node in all_nodes(restricted_subgraph)
             node[:schwarz_objective] = sum(node_objectives[node])
