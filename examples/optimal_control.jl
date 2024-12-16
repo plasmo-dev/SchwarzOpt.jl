@@ -36,15 +36,17 @@ end
 # subproblem optimizer
 sub_optimizer = Plasmo.optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
 
-#o ptimize using overlapping schwarz decomposition
+# optimize using overlapping schwarz decomposition
 optimizer = SchwarzOpt.Algorithm(
     graph;
     n_partitions=n_parts,
+    overlap_distance=1,
     subproblem_optimizer=sub_optimizer,
     max_iterations=100,
     mu=10.0,
 )
 
+# run the algorithm
 SchwarzOpt.run_algorithm!(optimizer)
 
 # check termination status
@@ -57,6 +59,7 @@ SchwarzOpt.run_algorithm!(optimizer)
 @show Plasmo.value(optimizer, state[1][:x])
 @show Plasmo.value(optimizer, control[1][:u])
 
-# you can also access the primal and dual feasibility vectors
+# you can also access the primal and dual feasibility vectors using 
+# algorithm methods.
 prf = SchwarzOpt.calculate_primal_feasibility(optimizer)
 duf = SchwarzOpt.calculate_dual_feasibility(optimizer)

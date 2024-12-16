@@ -35,11 +35,11 @@ function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
     return subgraph_boundary_constraints
 end
 
-function _get_subproblem_graph(node::OptiNode)
-    return node[:subproblem_graph]
-end
-
 # TODO: utilities for helpful checks
+
+function _is_hierarchical(graph::OptiGraph)
+    return !isempty(graph.subgraphs) && !isempty(graph.optinodes)
+end
 
 # check that overlap is at least 1
 function _check_overlap() end
@@ -49,5 +49,3 @@ function _check_contiguous_partitions() end
 
 # modify non_contiguous partitions to make them contiguous
 function _fix_non_contiguous_partitions() end
-
-function _check_hierarchical() end

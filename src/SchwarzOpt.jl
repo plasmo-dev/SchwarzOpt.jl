@@ -12,6 +12,6 @@ include("utils.jl")
 
 include("algorithm.jl")
 
-include("plasmo_interface.jl")
+include("interface.jl")
 
 end
