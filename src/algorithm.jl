@@ -1,3 +1,19 @@
+"""
+    Timers
+
+Simple data structure to track the timing of various stages of the algorithm.
+
+Fields:
+  - `start_time::Float64`: Time when the algorithm starts.
+  - `initialize_time::Float64`: Time taken to initialize the algorithm.
+  - `eval_objective_time::Float64`: Time taken to evaluate the objective function.
+  - `eval_primal_feasibility_time::Float64`: Time taken to evaluate primal feasibility.
+  - `eval_dual_feasibility_time::Float64`: Time taken to evaluate dual feasibility.
+  - `communicate_time::Float64`: Time spent in inter-subproblem communication.
+  - `update_subproblem_time::Float64`: Time taken to update subproblems.
+  - `solve_subproblem_time::Float64`: Time taken to solve subproblems.
+  - `total_time::Float64`: Total time for the entire process.
+"""
 @kwdef mutable struct Timers
     start_time::Float64 = 0.0
     initialize_time::Float64 = 0.0
@@ -10,6 +26,19 @@
     total_time::Float64 = 0.0
 end
 
+"""
+    Options
+
+Configuration options for the algorithm.
+
+Fields:
+  - `tolerance::Float64`: Convergence tolerance for primal and dual errors (default: `1e-4`).
+  - `max_iterations::Int64`: Maximum number of iterations to run (default: `1000`).
+  - `mu::Float64`: Penalty parameter for the augmented Lagrangian (default: `1.0`).
+  - `overlap_distance::Int64`: Distance for overlap in subproblem expansion (default: `1`).
+  - `use_node_objectives::Bool`: Whether to use node-specific objectives instead of a global graph objective (default: `true`).
+  - `subproblem_optimizer`: The optimizer to use for solving subproblems (default: `nothing`).
+"""
 @kwdef mutable struct Options
     tolerance::Float64 = 1e-4         # primal and dual tolerance measure
     max_iterations::Int64 = 1000      # maximum number of iterations
@@ -20,7 +49,21 @@ end
 end
 
 """
-    Data that is attached to a subproblem optigraph
+    SubProblemData{GT<:Plasmo.AbstractOptiGraph}
+
+Holds data specific to a subproblem in the optimization graph.
+
+Fields:
+  - `restricted_subgraph::GT`: The subgraph representing the "restricted" subproblem. This is the subproblem before adding overlap.
+  - `incident_variable_map::OrderedDict{NodeVariableRef,GT}`: Maps incident variables to their owning subgraphs.
+  - `incident_constraint_map::OrderedDict{EdgeConstraintRef,GT}`: Maps incident constraints to their owning subgraphs.
+  - `primal_values::OrderedDict{NodeVariableRef,Float64}`: Stores the current primal variable values.
+  - `dual_values::OrderedDict{EdgeConstraintRef,Float64}`: Stores the current dual variable values.
+  - `primal_parameters::OrderedDict{NodeVariableRef,NodeVariableRef}`: Maps primal variables to their parameter values.
+  - `dual_parameters::OrderedDict{EdgeConstraintRef,NodeVariableRef}`: Maps dual variables to their parameter values.
+  - `node_objectives::OrderedDict{OptiNode,Plasmo.AbstractJuMPScalar}`: Objective functions associated with nodes in the subproblem.
+  - `objective_function::Union{Nothing,Plasmo.AbstractJuMPScalar}`: The total objective function for the subproblem, including penalties.
+  - `last_termination_status::MOI.TerminationStatusCode`: The termination status from the last solve.
 """
 mutable struct SubProblemData{GT<:Plasmo.AbstractOptiGraph}
     restricted_subgraph::GT
@@ -46,7 +89,6 @@ mutable struct SubProblemData{GT<:Plasmo.AbstractOptiGraph}
     # subproblem termination status
     last_termination_status::MOI.TerminationStatusCode
 end
-
 function SubProblemData(restricted_subgraph::GT) where {GT<:Plasmo.AbstractOptiGraph}
     incident_variable_map = OrderedDict{NodeVariableRef,GT}()
     incident_constraint_map = OrderedDict{EdgeConstraintRef,GT}()
@@ -69,11 +111,39 @@ function SubProblemData(restricted_subgraph::GT) where {GT<:Plasmo.AbstractOptiG
     )
 end
 
+"""
+    Algorithm{GT<:Plasmo.AbstractOptiGraph}
+
+Represents a Schwarz-based optimization algorithm applied to a partitioned graph.
+
+Fields:
+  - `graph::GT`: The global optimization graph passed to the algorithm.
+  - `subproblems::Vector{GT}`: A list of subgraphs representing the (expanded) subproblems.
+  - `element_subproblem_map::Dict{Plasmo.OptiElement,GT}`: Maps elements in the graph to their associated subproblems.
+  - `objective_func::Plasmo.AbstractJuMPScalar`: The global objective function for the graph.
+  - `options::Options`: Configuration options for the algorithm.
+  - `initialized::Bool`: Whether the algorithm has been initialized.
+  - `status::MOI.TerminationStatusCode`: The current status of the algorithm.
+  - `err_pr::Union{Nothing,Float64}`: Current primal error.
+  - `err_du::Union{Nothing,Float64}`: Current dual error.
+  - `objective_value::Union{Nothing,Float64}`: Current objective value.
+  - `iteration::Int64`: Current iteration count.
+  - `primal_error_iters::Vector{Float64}`: History of primal errors per iteration.
+  - `dual_error_iters::Vector{Float64}`: History of dual errors per iteration.
+  - `objective_iters::Vector{Float64}`: History of objective values per iteration.
+  - `solve_time::Float64`: Total solve time.
+  - `timers::Timers`: Timers to measure performance metrics.
+
+Constructors:
+  - `Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)`: Create an algorithm instance with provided subproblems.
+  - `Algorithm(graph::OptiGraph, partition::Plasmo.Partition; kwargs...)`: Create an algorithm instance using a partition.
+  - `Algorithm(graph::OptiGraph; n_partitions=4, kwargs...)`: Create an algorithm instance with partitions generated using Metis.
+"""
 mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     graph::GT
     subproblems::Vector{GT}
 
-    # NOTE: we have to track which elements map to which subproblems. this is only
+    # NOTE: we have to track which elements map to which subproblems. this is the only
     # data that has to be centralized on the algorithm.
     element_subproblem_map::Dict{Plasmo.OptiElement,GT}
 
@@ -128,35 +198,6 @@ mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
         )
     end
 end
-
-Base.broadcastable(algorithm::Algorithm) = Ref(algorithm)
-
-# printing
-
-function Base.string(algorithm::Algorithm)
-    return @sprintf(
-        """
-        SchwarzAlgorithm
-        %30s %9s
-        %30s %9s
-        %30s %9s
-        %30s %9s
-        """,
-        "Number of subproblems:",
-        length(algorithm.subproblems),
-        "Number of variables:",
-        Plasmo.num_variables(algorithm.graph),
-        "Number of constraints:",
-        Plasmo.num_constraints(algorithm.graph),
-        "Number of linking constraints:",
-        Plasmo.num_local_link_constraints(algorithm.graph)
-    )
-end
-Base.print(io::IO, algorithm::Algorithm) = Base.print(io, Base.string(algorithm))
-Base.show(io::IO, algorithm::Algorithm) = Base.print(io, algorithm)
-
-# constructors
-
 """
     Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)
 
@@ -194,6 +235,49 @@ function Algorithm(graph::OptiGraph; n_partitions=4, kwargs...)
     return algorithm
 end
 
+Base.broadcastable(algorithm::Algorithm) = Ref(algorithm)
+
+# printing
+
+function Base.string(algorithm::Algorithm)
+    return @sprintf(
+        """
+        SchwarzAlgorithm
+        %30s %9s
+        %30s %9s
+        %30s %9s
+        %30s %9s
+        """,
+        "Number of subproblems:",
+        length(algorithm.subproblems),
+        "Number of variables:",
+        Plasmo.num_variables(algorithm.graph),
+        "Number of constraints:",
+        Plasmo.num_constraints(algorithm.graph),
+        "Number of linking constraints:",
+        Plasmo.num_local_link_constraints(algorithm.graph)
+    )
+end
+Base.print(io::IO, algorithm::Algorithm) = Base.print(io, Base.string(algorithm))
+Base.show(io::IO, algorithm::Algorithm) = Base.print(io, algorithm)
+
+"""
+    check_valid_problem(algorithm::Algorithm) -> Bool
+
+Validates the setup of an optimization problem for the specified algorithm. This function performs the following checks:
+
+1. Ensures a subproblem optimizer is defined in the algorithm options.
+2. Validates the consistency of subproblem graphs with their respective restricted subgraphs.
+3. Confirms that the objective function is separable. Non-separable objectives are currently unsupported.
+4. Verifies that the optimization graph does not exhibit a hierarchical structure, which is unsupported.
+
+If some of these checks fail, the algorithm's `status` is set to `MOI.INVALID_MODEL`, and an appropriate error is thrown.
+
+Notes:
+- Additional validations planned for future implementations:
+  - Checking for non-contiguous partitions.
+  - Ensuring there is sufficient overlap (at least 1) in expanded graphs.
+"""
 function check_valid_problem(algorithm::Algorithm)
     graph = algorithm.graph
     restricted_subgraphs = local_subgraphs(graph)
@@ -226,6 +310,7 @@ function check_valid_problem(algorithm::Algorithm)
     # TODO: check if graph is hierarchical. 
     # TODO: come up with way to handle 'parent' nodes in Schwarz setting
     if _is_hierarchical(graph)
+        algorithm.status = MOI.INVALID_MODEL
         error("Algorithm does not yet support optigraphs with a hierarchical structure.")
     end
 
@@ -238,10 +323,17 @@ function check_valid_problem(algorithm::Algorithm)
     return true
 end
 
-function _get_subproblem(algorithm::Algorithm, element::Plasmo.OptiElement)
-    return algorithm.element_subproblem_map[element]
-end
+"""
+    initialize!(algorithm::Algorithm)
 
+Initializes the algorithm by validating the input problem and setting up subproblems. This includes:
+  - Validating the global graph and subproblem consistency.
+  - Assigning incident constraints and variables.
+  - Setting up objective penalties for the subproblems.
+
+Throws:
+  - `ArgumentError` if the algorithm fails to initialize.
+"""
 function initialize!(algorithm::Algorithm)
     if algorithm.initialized
         error("Algorithm already initialized. Create a new instance of 
@@ -340,6 +432,25 @@ function initialize!(algorithm::Algorithm)
     end
 end
 
+"""
+    _get_subproblem(algorithm::Algorithm, element::Plasmo.OptiElement) -> GT
+
+Retrieves the subproblem associated with a given element in the optimization graph.
+"""
+function _get_subproblem(algorithm::Algorithm, element::Plasmo.OptiElement)
+    return algorithm.element_subproblem_map[element]
+end
+
+"""
+    _initialize_subproblem_objectives(algorithm::Algorithm)
+
+Initializes the objective functions for each subproblem in the algorithm. 
+
+This function either sets node objectives directly, if specified, or extracts
+and assigns the graph's separable objective terms to the subproblems. 
+
+Additionally, augmented Lagrangian penalty terms are added to the objectives.
+"""
 function _initialize_subproblem_objectives(algorithm::Algorithm)
     if algorithm.options.use_node_objectives
         for expanded_subgraph in algorithm.subproblems
@@ -367,6 +478,12 @@ function _initialize_subproblem_objectives(algorithm::Algorithm)
     return nothing
 end
 
+"""
+    _extract_node_objectives(algorithm::Algorithm)
+
+Extracts separable objective terms from the global graph and assigns them to the nodes 
+of each subproblem's restricted subgraph.
+"""
 function _extract_node_objectives(algorithm::Algorithm)
     objective_func = Plasmo.objective_function(algorithm.graph)
     for expanded_subgraph in algorithm.subproblems
@@ -379,27 +496,23 @@ function _extract_node_objectives(algorithm::Algorithm)
         )
         for node in all_nodes(restricted_subgraph)
             subproblem_data.node_objectives[node] = sum(node_objectives[node])
-            # node[:schwarz_objective] = sum(node_objectives[node])
         end
     end
     return nothing
 end
 
 """
-    _formulate_objective_penalty(
-        expanded_subgraph::OptiGraph,
-        mu::Float64
-    )
+    _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
 
-Formulate and add objective penalty term for the given subproblem.
+Adds dual penalties and an augmented Lagrangian penalty term to the objective of the 
+given subproblem.
 
 Args:
-    `expanded_subgraph`: The optimizer subproblem that contains overlap.
-    `mu`: A hyperparameter for the augmented lagrangian penalty.
+  - `expanded_subgraph`: The subproblem graph with overlap regions.
+  - `mu`: The penalty parameter for the augmented Lagrangian method.
 """
 function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     subproblem_data = expanded_subgraph.ext[:subproblem_data]
-
     # variable swap function for generating penalty terms
     incident_variables = keys(subproblem_data.incident_variable_map)
     function swap_variable_func(nvref::Plasmo.NodeVariableRef)
@@ -436,6 +549,12 @@ function _formulate_objective_penalty(expanded_subgraph::OptiGraph, mu::Float64)
     return nothing
 end
 
+"""
+    reset_iterations(algorithm::Algorithm)
+
+Resets the algorithm's iteration counters and initializes the timers.
+Also sets up optimizers for each subproblem.
+"""
 function reset_iterations(algorithm::Algorithm)
     algorithm.timers = Timers()
     algorithm.timers.start_time = time()
@@ -454,8 +573,10 @@ end
 """
     do_iteration(algorithm::Algorithm)
 
-    Perform a single iteration of the algorithm. Solves each subproblem and communicates 
-    solution values between them.
+Performs a single iteration of the algorithm. This involves:
+1. Solving each subproblem.
+2. Communicating primal and dual values between subproblems.
+3. Updating subproblem objectives, penalties, and neighbor values.
 """
 function do_iteration(algorithm::Algorithm)
     # update based on current information
@@ -481,6 +602,11 @@ function do_iteration(algorithm::Algorithm)
     return nothing
 end
 
+"""
+    _solve_subproblem(subproblem_graph::OptiGraph)
+
+Solves an individual subproblem and logs its termination status.
+"""
 function _solve_subproblem(subproblem_graph::OptiGraph)
     Plasmo.optimize!(subproblem_graph)
     term_status = Plasmo.termination_status(subproblem_graph)
@@ -495,6 +621,12 @@ function _solve_subproblem(subproblem_graph::OptiGraph)
     return nothing
 end
 
+"""
+    _retrieve_neighbor_values(subproblem_graph::OptiGraph)
+
+Fetches primal and dual values from neighboring subproblems linked via incident
+variables and constraints.
+"""
 function _retrieve_neighbor_values(subproblem_graph::OptiGraph)
     subproblem_data = subproblem_graph.ext[:subproblem_data]
     for (variable, remote_graph) in subproblem_data.incident_variable_map
@@ -508,11 +640,22 @@ function _retrieve_neighbor_values(subproblem_graph::OptiGraph)
     return nothing
 end
 
+"""
+    _update_suproblem(subproblem_graph::OptiGraph)
+
+Updates the objective penalty terms of the given subproblem based on the current
+neighbor values.
+"""
 function _update_suproblem(subproblem_graph::OptiGraph)
     _update_objective_penalty(subproblem_graph)
     return nothing
 end
 
+"""
+    _update_objective_penalty(expanded_subgraph::OptiGraph)
+
+Updates the terms in the subproblem's objective based on the current primal and dual values.
+"""
 function _update_objective_penalty(expanded_subgraph::OptiGraph)
     subproblem_data = expanded_subgraph.ext[:subproblem_data]
     for variable in keys(subproblem_data.incident_variable_map)
@@ -530,9 +673,17 @@ function _update_objective_penalty(expanded_subgraph::OptiGraph)
 end
 
 """
-    calculate_objective_value(algorithm::Algorithm)
+    calculate_objective_value(algorithm::Algorithm) -> Float64
 
-Evaluate the objective value defined over the algorithm's graph.
+Evaluate the objective value defined over the algorithm's graph. The function uses 
+the current variable values from the subproblems to compute the overall objective.
+
+Args:
+  - `algorithm::Algorithm`: The algorithm object containing the objective function 
+    and subproblem mappings.
+
+Returns:
+    The evaluated objective value as a `Float64`.
 """
 function calculate_objective_value(algorithm::Algorithm)
     # grab variable values from corresponding subproblems
@@ -552,10 +703,17 @@ function calculate_objective_value(algorithm::Algorithm)
 end
 
 """
-    calculate_primal_feasibility(algorithm::Algorithm)
+    calculate_primal_feasibility(algorithm::Algorithm) -> Vector{Float64}
 
 Evaluate the primal feasibility of the linking constraints defined over the 
-algorithm's graph.
+algorithm's graph. This is done by checking the residuals between the linking 
+constraints and their expected values based on the subproblem solutions.
+
+Args:
+  - `algorithm::Algorithm`: The algorithm object containing the graph and linking constraints.
+
+Returns:
+    A vector of primal residuals for the linking constraints.
 """
 function calculate_primal_feasibility(algorithm::Algorithm)
     link_constraint_refs = local_link_constraints(algorithm.graph)
@@ -585,10 +743,17 @@ function calculate_primal_feasibility(algorithm::Algorithm)
 end
 
 """
-    calculate_dual_feasibility(algorithm::Algorithm)
+    calculate_dual_feasibility(algorithm::Algorithm) -> Vector{Float64}
 
 Evaluate the dual feasibility of the linking constraints defined over the 
-algorithm's graph. NOTE: Need at least an overlap of one to calculate the dual.
+algorithm's graph. For each linking constraint, the function calculates the 
+difference between the maximum and minimum dual values across subproblems.
+
+Args:
+  - `algorithm::Algorithm`: The algorithm object containing the graph and linking constraints.
+
+Returns:
+    A vector of dual residuals for the linking constraints.
 """
 function calculate_dual_feasibility(algorithm::Algorithm)
     graph = algorithm.graph
@@ -618,10 +783,18 @@ function calculate_dual_feasibility(algorithm::Algorithm)
 end
 
 """
-    eval_iteration(algorithm::Algorithm; save_iteration=true)
+    eval_iteration(algorithm::Algorithm; save_iteration::Bool=true)
 
-Evaluate the current iterate and store values. Save the iterate values internally if 
-`save_iteration=true`.
+Evaluate the current iterate of the algorithm by calculating primal and dual 
+feasibility, as well as the objective value. Optionally, the iterate values 
+can be stored internally for tracking progress.
+
+Args:
+  - `algorithm::Algorithm`: The algorithm object representing the current optimization state.
+  - `save_iteration::Bool`: Whether to save the iterate values. Default is `true`.
+
+Returns:
+    Nothing. Updates the algorithm state with current feasibility and objective values.
 """
 function eval_iteration(algorithm::Algorithm; save_iteration=true)
     # evaluate residuals
@@ -648,6 +821,12 @@ function eval_iteration(algorithm::Algorithm; save_iteration=true)
     return nothing
 end
 
+"""
+    _check_tolerance(algorithm::Algorithm) -> Bool
+
+Check if the primal or dual residuals exceed the specified tolerance. This 
+determines whether the algorithm should continue iterating.
+"""
 function _check_tolerance(algorithm::Algorithm)
     if algorithm.err_pr > algorithm.options.tolerance
         return true
@@ -657,6 +836,12 @@ function _check_tolerance(algorithm::Algorithm)
     return false
 end
 
+"""
+    run_algorithm!(algorithm::Algorithm)
+
+Execute the optimization algorithm, iteratively solving subproblems and updating 
+the solution until convergence or a stopping criterion is met.
+"""
 function run_algorithm!(algorithm::Algorithm)
     if !algorithm.initialized
         println("Initializing Algorithm...")

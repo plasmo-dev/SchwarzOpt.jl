@@ -35,11 +35,11 @@ function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
     return subgraph_boundary_constraints
 end
 
-# TODO: utilities for helpful checks
-
 function _is_hierarchical(graph::OptiGraph)
     return !isempty(graph.subgraphs) && !isempty(graph.optinodes)
 end
+
+# TODO: utilities for helpful checks
 
 # check that overlap is at least 1
 function _check_overlap() end
