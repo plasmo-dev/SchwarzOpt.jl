@@ -1,10 +1,18 @@
 """
-    _find_boundary_edges(
-        projection::Plasmo.HyperGraphProjection, 
-        subgraphs::Vector{OptiGraph}
-    )
+    _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph}) -> Vector{Vector{OptiEdge}}
 
-    Find the boundary edges given a hypergraph projection and vector of subgraphs.
+Identify the boundary edges for a set of subgraphs within a given hypergraph. 
+Boundary edges are those incident to nodes at the interface between the subgraphs 
+and the rest of the graph.
+
+Args:
+  - `graph::OptiGraph`: The main graph containing the subgraphs and edges.
+  - `subgraphs::Vector{OptiGraph}`: A vector of subgraphs for which boundary edges 
+    need to be identified.
+
+Returns:
+    A vector of vectors, where each inner vector contains the boundary edges 
+    associated with a specific subgraph.
 """
 function _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph})
     projection = hyper_projection(graph)
@@ -18,10 +26,18 @@ function _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph})
 end
 
 """
-    _get_boundary_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+    _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}}) -> Vector{Vector{ConstraintRef}}
 
-    Collect the constraints associated with subgraph boundary edges. Return a vector
-    of constraints for each subgraph.
+Retrieve the constraints associated with boundary edges for a set of subgraphs. 
+For each subgraph, the constraints tied to its boundary edges are collected.
+
+Args:
+  - `subgraph_boundary_edges::Vector{Vector{OptiEdge}}`: A vector of vectors, 
+    where each inner vector contains the boundary edges of a specific subgraph.
+
+Returns:
+    A vector of vectors, where each inner vector contains the constraints 
+    associated with the boundary edges of a specific subgraph.
 """
 function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
     subgraph_boundary_constraints = Vector{Vector{ConstraintRef}}()
@@ -35,6 +51,11 @@ function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
     return subgraph_boundary_constraints
 end
 
+"""
+    _is_hierarchical(graph::OptiGraph)
+
+Check whether the given graph is hierarchical (i.e. contains nodes and subgraphs.)
+"""
 function _is_hierarchical(graph::OptiGraph)
     return !isempty(graph.subgraphs) && !isempty(graph.optinodes)
 end

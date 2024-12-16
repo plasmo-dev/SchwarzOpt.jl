@@ -133,11 +133,6 @@ Fields:
   - `objective_iters::Vector{Float64}`: History of objective values per iteration.
   - `solve_time::Float64`: Total solve time.
   - `timers::Timers`: Timers to measure performance metrics.
-
-Constructors:
-  - `Algorithm(graph::OptiGraph, expanded_subgraphs::Vector{OptiGraph}; kwargs...)`: Create an algorithm instance with provided subproblems.
-  - `Algorithm(graph::OptiGraph, partition::Plasmo.Partition; kwargs...)`: Create an algorithm instance using a partition.
-  - `Algorithm(graph::OptiGraph; n_partitions=4, kwargs...)`: Create an algorithm instance with partitions generated using Metis.
 """
 mutable struct Algorithm{GT<:Plasmo.AbstractOptiGraph}
     graph::GT
