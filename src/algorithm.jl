@@ -574,6 +574,12 @@ Performs a single iteration of the algorithm. This involves:
 3. Updating subproblem objectives, penalties, and neighbor values.
 """
 function do_iteration(algorithm::Algorithm)
+    algorithm.timers.update_subproblem_time += @elapsed begin
+        Threads.@threads for subproblem_graph in algorithm.subproblems
+            _update_subproblem(subproblem_graph)
+        end
+    end
+
     # update based on current information
     algorithm.timers.solve_subproblem_time += @elapsed begin
         Threads.@threads for subproblem_graph in algorithm.subproblems
@@ -585,12 +591,6 @@ function do_iteration(algorithm::Algorithm)
     algorithm.timers.communicate_time += @elapsed begin
         Threads.@threads for subproblem_graph in algorithm.subproblems
             _retrieve_neighbor_values(subproblem_graph)
-        end
-    end
-
-    algorithm.timers.update_subproblem_time += @elapsed begin
-        Threads.@threads for subproblem_graph in algorithm.subproblems
-            _update_suproblem(subproblem_graph)
         end
     end
 
@@ -641,7 +641,15 @@ end
 Updates the objective penalty terms of the given subproblem based on the current
 neighbor values.
 """
-function _update_suproblem(subproblem_graph::OptiGraph)
+function _update_subproblem(subproblem_graph::OptiGraph)
+    if Plasmo.primal_status(subproblem_graph; result=1) != MOI.NO_SOLUTION
+        var_vals = value.(Ref(subproblem_graph), all_variables(subproblem_graph))
+        for (i, var) in enumerate(all_variables(subproblem_graph))
+            if !(Plasmo.is_parameter(var))
+                Plasmo.set_start_value(var, var_vals[i])
+            end
+        end
+    end
     _update_objective_penalty(subproblem_graph)
     return nothing
 end
@@ -879,16 +887,16 @@ function run_algorithm!(algorithm::Algorithm)
             algorithm.err_du
         )
 
-        # update start values
-        algorithm.timers.update_subproblem_time += @elapsed begin
-            for subproblem in algorithm.subproblems
-                JuMP.set_start_value.(
-                    Ref(subproblem),
-                    all_variables(subproblem),
-                    value.(Ref(subproblem), all_variables(subproblem)),
-                )
-            end
-        end
+        # # update start values
+        # algorithm.timers.update_subproblem_time += @elapsed begin
+        #     for subproblem in algorithm.subproblems
+        #         JuMP.set_start_value.(
+        #             Ref(subproblem),
+        #             all_variables(subproblem),
+        #             value.(Ref(subproblem), all_variables(subproblem)),
+        #         )
+        #     end
+        # end
     end
 
     algorithm.timers.total_time = time() - algorithm.timers.start_time
