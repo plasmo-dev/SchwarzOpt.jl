@@ -1,58 +1,72 @@
-function _expand_subgraphs(graph::OptiGraph, overlap::Int64)
-    subproblem_graphs = []
-    boundary_linkedges_list = []
-    hypergraph, hyper_map = gethypergraph(graph)
+"""
+    _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph}) -> Vector{Vector{OptiEdge}}
 
-    #NOTE: This could all be calculated simultaneously
-    for subgraph in getsubgraphs(mg)
-        println("Performing neighborhood expansion...")
-        subnodes = all_nodes(subgraph)
-        hypernodes = [hyper_map[node] for node in subnodes]
+Identify the boundary edges for a set of subgraphs within a given hypergraph. 
+Boundary edges are those incident to nodes at the interface between the subgraphs 
+and the rest of the graph.
 
-        #Return new hypernodes and hyperedges covered through the expansion.
-        overlap_hnodes = Plasmo.neighborhood(hypergraph, hypernodes, overlap)
-        overlap_hedges = Plasmo.induced_edges(hypergraph, overlap_hnodes)
-        boundary_hedges = Plasmo.incident_edges(hypergraph, overlap_hnodes)
+Args:
+  - `graph::OptiGraph`: The main graph containing the subgraphs and edges.
+  - `subgraphs::Vector{OptiGraph}`: A vector of subgraphs for which boundary edges 
+    need to be identified.
 
-        overlap_nodes = [hyper_map[node] for node in overlap_hnodes]
-        overlap_edges = [hyper_map[edge] for edge in overlap_hedges]
-        boundary_edges = [hyper_map[edge] for edge in boundary_hedges]
-
-        #Setup subproblem graphs
-        subproblem_graph = OptiGraph()
-        subproblem_graph.modelnodes = overlap_nodes
-        subproblem_graph.linkedges = overlap_edges
-
-        push!(subproblem_graphs, subproblem_graph)
-        push!(boundary_linkedges_list, boundary_edges)
-    end
-
-    return subproblem_graphs, boundary_linkedges_list
-end
-
-# collect linkconstraints on boundary edges
-function _gather_links(subgraphs, subgraph_boundary_edges)
-    subgraph_links = []
-    for (i, edge_set) in enumerate(subgraph_boundary_edges)
-        links = LinkConstraintRef[]
-        for edge in edge_set
-            linkrefs = edge.linkrefs
-            for linkref in linkrefs
-                push!(links, linkref)
-            end
-        end
-        push!(subgraph_links, links)
-    end
-    return subgraph_links
-end
-
-# find boundary edges of expanded subgraphs
-function _find_boundaries(optigraph::OptiGraph, subgraphs::Vector{OptiGraph})
-    boundary_linkedges_list = []
+Returns:
+    A vector of vectors, where each inner vector contains the boundary edges 
+    associated with a specific subgraph.
+"""
+function _find_boundary_edges(graph::OptiGraph, subgraphs::Vector{OptiGraph})
+    projection = hyper_projection(graph)
+    boundary_edge_list = Vector{Vector{OptiEdge}}()
     for subgraph in subgraphs
-        subnodes = all_nodes(subgraph)
-        boundary_edges = Plasmo.incident_edges(optigraph, subnodes)
-        push!(boundary_linkedges_list, boundary_edges)
+        subgraph_nodes = all_nodes(subgraph)
+        boundary_edges = Plasmo.incident_edges(projection, subgraph_nodes)
+        push!(boundary_edge_list, boundary_edges)
     end
-    return boundary_linkedges_list
+    return boundary_edge_list
 end
+
+"""
+    _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}}) -> Vector{Vector{ConstraintRef}}
+
+Retrieve the constraints associated with boundary edges for a set of subgraphs. 
+For each subgraph, the constraints tied to its boundary edges are collected.
+
+Args:
+  - `subgraph_boundary_edges::Vector{Vector{OptiEdge}}`: A vector of vectors, 
+    where each inner vector contains the boundary edges of a specific subgraph.
+
+Returns:
+    A vector of vectors, where each inner vector contains the constraints 
+    associated with the boundary edges of a specific subgraph.
+"""
+function _extract_constraints(subgraph_boundary_edges::Vector{Vector{OptiEdge}})
+    subgraph_boundary_constraints = Vector{Vector{ConstraintRef}}()
+    for edge_vector in subgraph_boundary_edges
+        edge_constraints = Vector{ConstraintRef}()
+        for edge in edge_vector
+            append!(edge_constraints, all_constraints(edge))
+        end
+        push!(subgraph_boundary_constraints, edge_constraints)
+    end
+    return subgraph_boundary_constraints
+end
+
+"""
+    _is_hierarchical(graph::OptiGraph)
+
+Check whether the given graph is hierarchical (i.e. contains nodes and subgraphs.)
+"""
+function _is_hierarchical(graph::OptiGraph)
+    return !isempty(graph.subgraphs) && !isempty(graph.optinodes)
+end
+
+# TODO: utilities for helpful checks
+
+# check that overlap is at least 1
+function _check_overlap() end
+
+# check whether partitions are contiguous
+function _check_contiguous_partitions() end
+
+# modify non_contiguous partitions to make them contiguous
+function _fix_non_contiguous_partitions() end

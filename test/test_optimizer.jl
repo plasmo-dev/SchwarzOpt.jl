@@ -1,3 +1,3 @@
 include((@__DIR__) * "/../examples/optimal_control.jl")
 
-@test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.LOCALLY_SOLVED
+@test Plasmo.termination_status(optimizer) == MOI.LOCALLY_SOLVED

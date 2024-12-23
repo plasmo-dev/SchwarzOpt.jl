@@ -3,18 +3,16 @@ using Plasmo, Ipopt
 using KaHyPar
 using SchwarzOpt
 
-T = 200             #number of time points
-d = sin.(1:T)       #a disturbance vector
-imbalance = 0.1    #partition imbalance
-distance = 2        #expand distance
-n_parts = 10        #number of partitions
+T = 200             # number of time points
+d = sin.(1:T)       # a disturbance vector
+imbalance = 0.1     # partition imbalance
+distance = 2        # expansion distance
+n_parts = 10        # number of partitions
 
-#Create the model (an optigraph)
-graph = OptiGraph()
-
+# create the optigraph
+graph = Plasmo.OptiGraph()
 @optinode(graph, state[1:T])
 @optinode(graph, control[1:(T - 1)])
-
 for (i, node) in enumerate(state)
     @variable(node, x)
     @constraint(node, x >= 0)
@@ -25,30 +23,43 @@ for node in control
     @constraint(node, u >= -1000)
     @objective(node, Min, u^2)
 end
+
+# initial condition
 n1 = state[1]
 @constraint(n1, n1[:x] == 0)
 
+# dynamics
 for i in 1:(T - 1)
-    @linkconstraint(graph, state[i][:x] + control[i][:u] + d[i] == state[i + 1][:x])
+    @linkconstraint(graph, state[i + 1][:x] == state[i][:x] + control[i][:u] + d[i])
 end
 
-hypergraph, hyper_map = hyper_graph(graph) #create hypergraph object based on graph
-partition_vector = KaHyPar.partition(
-    hypergraph, n_parts; configuration=:edge_cut, imbalance=imbalance
-)
-partition = Partition(hypergraph, partition_vector, hyper_map)
-apply_partition!(graph, partition)
+# subproblem optimizer
+sub_optimizer = Plasmo.optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
 
-#calculate subproblems using expansion distance
-subs = subgraphs(graph)
-expanded_subgraphs = Plasmo.expand.(graph, subs, distance)
-sub_optimizer = optimizer_with_attributes(Ipopt.Optimizer, "print_level" => 0)
-
-#optimize using schwarz overlapping decomposition
-optimizer = SchwarzOpt.optimize!(
+# optimize using overlapping schwarz decomposition
+optimizer = SchwarzOpt.Algorithm(
     graph;
-    subgraphs=expanded_subgraphs,
-    sub_optimizer=sub_optimizer,
+    n_partitions=n_parts,
+    overlap_distance=1,
+    subproblem_optimizer=sub_optimizer,
     max_iterations=100,
-    mu=100.0,
+    mu=10.0,
 )
+
+# run the algorithm
+SchwarzOpt.run_algorithm!(optimizer)
+
+# check termination status
+@show Plasmo.termination_status(optimizer)
+
+# check objective value
+@show Plasmo.objective_value(optimizer)
+
+# check first state and control values
+@show Plasmo.value(optimizer, state[1][:x])
+@show Plasmo.value(optimizer, control[1][:u])
+
+# you can also access the primal and dual feasibility vectors using 
+# algorithm methods.
+prf = SchwarzOpt.calculate_primal_feasibility(optimizer)
+duf = SchwarzOpt.calculate_dual_feasibility(optimizer)
